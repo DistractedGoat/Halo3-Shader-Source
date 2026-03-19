@@ -29,6 +29,7 @@
 #include "entry.fx"
 #include "clip_plane.fx"
 #include "dynamic_light_clip.fx"
+#include "motion_vectors.fx"
 
 
 #ifdef pc
@@ -894,14 +895,21 @@ void static_per_pixel_vs(
 	out float4 lightmap_texcoord : TEXCOORD4,
 	out float3 fragment_to_camera_world : TEXCOORD5,
 	out float3 extinction : COLOR0,
-	out float3 inscatter : COLOR1)
+	out float3 inscatter : COLOR1
+#ifdef ACCUM_PIXEL_HAS_MV
+	, out float2 motion_vector : TEXCOORD10
+#endif
+	)
 {
 	default_vertex_transform_vs(vertex, position, texcoord, normal, binormal, tangent, fragment_to_camera_world);
-	
+
 	lightmap_texcoord= float4(lightmap.texcoord, 0, 0);
 
 	compute_scattering(Camera_Position, vertex.position, extinction, inscatter);
-	
+
+#ifdef ACCUM_PIXEL_HAS_MV
+	motion_vector = compute_motion_vector(position, vertex.position);
+#endif
 	CALC_CLIP(position);
 }
 
@@ -1203,8 +1211,15 @@ accum_pixel static_per_pixel_ps(
 	in float4 lightmap_texcoord : TEXCOORD4_centroid,
 	in float3 fragment_to_camera_world : TEXCOORD5,
 	in float3 extinction : COLOR0,
-	in float3 inscatter : COLOR1)
-{	
+	in float3 inscatter : COLOR1
+#ifdef ACCUM_PIXEL_HAS_MV
+	, in float2 motion_vector : TEXCOORD10
+#endif
+	)
+{
+#ifdef ACCUM_PIXEL_HAS_MV
+	g_motion_vector_passthrough = motion_vector;
+#endif
 	entry_point_data data;
 	BUILD_ENTRY_POINT_DATA(data);
 	return static_lighting_shared_ps(
@@ -1241,16 +1256,23 @@ void static_per_vertex_vs(
 	out float4 probe0_3_g : TEXCOORD6,
 	out float4 probe0_3_b : TEXCOORD7,
 	out float3 extinction : COLOR0,
-	out float3 inscatter : COLOR1)
+	out float3 inscatter : COLOR1
+#ifdef ACCUM_PIXEL_HAS_MV
+	, out float2 motion_vector : TEXCOORD10
+#endif
+	)
 {
-	default_vertex_transform_vs(vertex, position, texcoord, normal, binormal, tangent, fragment_to_camera_world);	
-	
+	default_vertex_transform_vs(vertex, position, texcoord, normal, binormal, tangent, fragment_to_camera_world);
+
 	probe0_3_r= c0_3_r;
 	probe0_3_g= c0_3_g;
 	probe0_3_b= c0_3_b;
-	
-	compute_scattering(Camera_Position, vertex.position, extinction, inscatter);	
-	
+
+	compute_scattering(Camera_Position, vertex.position, extinction, inscatter);
+
+#ifdef ACCUM_PIXEL_HAS_MV
+	motion_vector = compute_motion_vector(position, vertex.position);
+#endif
 	CALC_CLIP(position);
 }
 
@@ -1266,8 +1288,15 @@ accum_pixel static_per_vertex_ps(
 	in float4 p0_3_g : TEXCOORD6,
 	in float4 p0_3_b : TEXCOORD7,
 	in float3 extinction : COLOR0,
-	in float3 inscatter : COLOR1)
+	in float3 inscatter : COLOR1
+#ifdef ACCUM_PIXEL_HAS_MV
+	, in float2 motion_vector : TEXCOORD10
+#endif
+	)
 {
+#ifdef ACCUM_PIXEL_HAS_MV
+	g_motion_vector_passthrough = motion_vector;
+#endif
 	entry_point_data data;
 	BUILD_ENTRY_POINT_DATA(data);
 	return static_lighting_shared_ps(
@@ -1298,10 +1327,17 @@ void static_sh_vs(
 	out float3 tangent : TEXCOORD3,
 	out float3 fragment_to_camera_world : TEXCOORD4,
 	out float3 extinction : COLOR0,
-	out float3 inscatter : COLOR1)
+	out float3 inscatter : COLOR1
+#ifdef ACCUM_PIXEL_HAS_MV
+	, out float2 motion_vector : TEXCOORD10
+#endif
+	)
 {
 	default_vertex_transform_vs(vertex, position, texcoord, normal, binormal, tangent, fragment_to_camera_world);
 	compute_scattering(Camera_Position, vertex.position, extinction, inscatter);
+#ifdef ACCUM_PIXEL_HAS_MV
+	motion_vector = compute_motion_vector(position, vertex.position);
+#endif
 	CALC_CLIP(position);
 }
 
@@ -1314,8 +1350,15 @@ accum_pixel static_sh_ps(
 	in float3 tangent : TEXCOORD3,
 	in float3 fragment_to_camera_world : TEXCOORD4,
 	in float3 extinction : COLOR0,
-	in float3 inscatter : COLOR1)
+	in float3 inscatter : COLOR1
+#ifdef ACCUM_PIXEL_HAS_MV
+	, in float2 motion_vector : TEXCOORD10
+#endif
+	)
 {
+#ifdef ACCUM_PIXEL_HAS_MV
+	g_motion_vector_passthrough = motion_vector;
+#endif
 	entry_point_data data;
 	BUILD_ENTRY_POINT_DATA(data);
 	return static_lighting_shared_ps(
@@ -1336,9 +1379,9 @@ PARAM_SAMPLER_2D(dynamic_light_gel_texture);
 void dynamic_light_vs(
 	in vertex_type vertex,
 	out float4 position : SV_Position,
-#if DX_VERSION == 11	
+#if DX_VERSION == 11
 	out s_dynamic_light_clip_distance clip_distance,
-#endif	
+#endif
 	out float2 texcoord : TEXCOORD0,
 	out float3 normal : TEXCOORD1,
 	out float3 binormal : TEXCOORD2,
@@ -1346,7 +1389,11 @@ void dynamic_light_vs(
 	out float3 fragment_to_camera_world : TEXCOORD4,
 	out float4 fragment_position_shadow : TEXCOORD5,
 	out float3 extinction : COLOR0,
-	out float3 inscatter : COLOR1)		// homogenous coordinates of the fragment position in projective shadow space)
+	out float3 inscatter : COLOR1		// homogenous coordinates of the fragment position in projective shadow space)
+#ifdef ACCUM_PIXEL_HAS_MV
+	, out float2 motion_vector : TEXCOORD10
+#endif
+	)
 {
 	//output to pixel shader
 	float4 local_to_world_transform[3];
@@ -1360,21 +1407,24 @@ void dynamic_light_vs(
 	binormal= vertex.binormal;
 	// world space vector from vertex to eye/camera
 	fragment_to_camera_world= Camera_Position - vertex.position;
-		
-	fragment_position_shadow= mul(float4(vertex.position, 1.0f), Shadow_Projection);		
-	
-	compute_scattering(Camera_Position, vertex.position, extinction, inscatter);		
-	
-#if DX_VERSION == 11	
+
+	fragment_position_shadow= mul(float4(vertex.position, 1.0f), Shadow_Projection);
+
+	compute_scattering(Camera_Position, vertex.position, extinction, inscatter);
+
+#ifdef ACCUM_PIXEL_HAS_MV
+	motion_vector = compute_motion_vector(position, vertex.position);
+#endif
+#if DX_VERSION == 11
 	clip_distance = calc_dynamic_light_clip_distance(position);
 #endif
 }
 
 accum_pixel dynamic_light_ps(
 	SCREEN_POSITION_INPUT(fragment_position),
-#if DX_VERSION == 11	
+#if DX_VERSION == 11
 	in s_dynamic_light_clip_distance clip_distance,
-#endif	
+#endif
 	in float2 texcoord : TEXCOORD0,
 	in float3 normal : TEXCOORD1,
 	in float3 binormal : TEXCOORD2,
@@ -1382,8 +1432,15 @@ accum_pixel dynamic_light_ps(
 	in float3 fragment_to_camera_world : TEXCOORD4,
 	in float4 fragment_position_shadow : TEXCOORD5,
 	in float3 extinction : COLOR0,
-	in float3 inscatter : COLOR1)		// homogenous coordinates of the fragment position in projective shadow space
+	in float3 inscatter : COLOR1		// homogenous coordinates of the fragment position in projective shadow space
+#ifdef ACCUM_PIXEL_HAS_MV
+	, in float2 motion_vector : TEXCOORD10
+#endif
+	)
 {
+#ifdef ACCUM_PIXEL_HAS_MV
+	g_motion_vector_passthrough = motion_vector;
+#endif
 	// get blend values
 	float4 blend= sample_blend_normalized(texcoord);
 	
@@ -1520,7 +1577,11 @@ void lightmap_debug_mode_vs(
 	out float2 texcoord:TEXCOORD2,
 	out float3 tangent:TEXCOORD3,
 	out float3 binormal:TEXCOORD4,
-	out float3 fragment_to_camera_world:TEXCOORD5)
+	out float3 fragment_to_camera_world:TEXCOORD5
+#ifdef ACCUM_PIXEL_HAS_MV
+	, out float2 motion_vector : TEXCOORD10
+#endif
+	)
 {
 
 	float4 local_to_world_transform[3];
@@ -1528,12 +1589,15 @@ void lightmap_debug_mode_vs(
 
 	//output to pixel shader
 	always_local_to_view(vertex, local_to_world_transform, position);
-	lightmap_texcoord= lightmap.texcoord;	
+	lightmap_texcoord= lightmap.texcoord;
 	normal= vertex.normal;
 	texcoord= vertex.texcoord;
 	tangent= vertex.tangent;
 	binormal= vertex.binormal;
-	
+
+#ifdef ACCUM_PIXEL_HAS_MV
+	motion_vector = compute_motion_vector(position, vertex.position);
+#endif
 	CALC_CLIP(position);
 }
 
@@ -1545,10 +1609,17 @@ accum_pixel lightmap_debug_mode_ps(
 	in float2 texcoord:TEXCOORD2,
 	in float3 tangent:TEXCOORD3,
 	in float3 binormal:TEXCOORD4,
-	in float3 fragment_to_camera_world:TEXCOORD5) : SV_Target
-{   	
+	in float3 fragment_to_camera_world:TEXCOORD5
+#ifdef ACCUM_PIXEL_HAS_MV
+	, in float2 motion_vector : TEXCOORD10
+#endif
+	) : SV_Target
+{
+#ifdef ACCUM_PIXEL_HAS_MV
+	g_motion_vector_passthrough = motion_vector;
+#endif
 	float4 out_color;
-	
+
 	out_color= display_debug_modes(
 		lightmap_texcoord,
 		normal,

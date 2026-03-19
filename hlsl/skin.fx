@@ -24,6 +24,8 @@ Copyright (c) Microsoft Corporation, 2007. all rights reserved.
 #include "clip_plane.fx"
 #include "dynamic_light_clip.fx"
 
+#include "motion_vectors.fx"
+
 void albedo_vs(
 	in vertex_type vertex,
 	out float4 position : SV_Position,
@@ -63,7 +65,11 @@ void static_per_pixel_vs(
 	out float3 tangent : TEXCOORD5,
 	out float2 lightmap_texcoord : TEXCOORD6,
 	out float3 extinction : COLOR0,
-	out float3 inscatter : COLOR1)
+	out float3 inscatter : COLOR1
+#ifdef ACCUM_PIXEL_HAS_MV
+	, out float2 motion_vector : TEXCOORD10
+#endif
+	)
 {
 	float4 local_to_world_transform[3];
 
@@ -77,7 +83,11 @@ void static_per_pixel_vs(
 	binormal= vertex.binormal;
 
 	compute_scattering(Camera_Position, vertex.position, extinction, inscatter);
-	
+
+#ifdef ACCUM_PIXEL_HAS_MV
+	motion_vector = compute_motion_vector(position, vertex.position);
+#endif
+
 	CALC_CLIP(position);
 }
 
@@ -91,9 +101,15 @@ accum_pixel static_per_pixel_ps(
 	in float2 lightmap_texcoord : TEXCOORD6,
 	in float3 extinction : COLOR0,
 	in float3 inscatter : COLOR1
+#ifdef ACCUM_PIXEL_HAS_MV
+	, in float2 motion_vector : TEXCOORD10
+#endif
 	) : SV_Target
 {
-	float4 out_color= float4(1.0f, 1.0f, 1.0f, 1.0f);		
+	float4 out_color= float4(1.0f, 1.0f, 1.0f, 1.0f);
+#ifdef ACCUM_PIXEL_HAS_MV
+	g_motion_vector_passthrough = motion_vector;
+#endif
 	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(out_color, true, false);
 }
 
@@ -102,12 +118,16 @@ void dynamic_light_vs(
 	out float4 position : SV_Position,
 #if DX_VERSION == 11
 	out s_dynamic_light_clip_distance clip_distance,
-#endif	
+#endif
 	out float2 texcoord : TEXCOORD0,
 	out float3 normal : TEXCOORD1,
 	out float3 binormal : TEXCOORD2,
 	out float3 tangent : TEXCOORD3,
-	out float4 fragment_position_shadow : TEXCOORD5)
+	out float4 fragment_position_shadow : TEXCOORD5
+#ifdef ACCUM_PIXEL_HAS_MV
+	, out float2 motion_vector : TEXCOORD10
+#endif
+	)
 {
 	//output to pixel shader
 	float4 local_to_world_transform[3];
@@ -121,7 +141,11 @@ void dynamic_light_vs(
 	binormal= vertex.binormal;
 
 	fragment_position_shadow= mul(float4(vertex.position, 1.0f), Shadow_Projection);
-	
+
+#ifdef ACCUM_PIXEL_HAS_MV
+	motion_vector = compute_motion_vector(position, vertex.position);
+#endif
+
 #if DX_VERSION == 11
 	clip_distance = calc_dynamic_light_clip_distance(position);
 #endif
@@ -131,64 +155,102 @@ accum_pixel dynamic_light_ps(
 	SCREEN_POSITION_INPUT(fragment_position),
 #if DX_VERSION == 11
 	in s_dynamic_light_clip_distance clip_distance,
-#endif	
+#endif
 	in float2 original_texcoord : TEXCOORD0,
 	in float3 normal : TEXCOORD1,
 	in float3 binormal : TEXCOORD2,
 	in float3 tangent : TEXCOORD3,
-	in float4 fragment_position_shadow : TEXCOORD5)
+	in float4 fragment_position_shadow : TEXCOORD5
+#ifdef ACCUM_PIXEL_HAS_MV
+	, in float2 motion_vector : TEXCOORD10
+#endif
+	)
 {
-	float4 out_color= float4(1.0f, 1.0f, 1.0f, 1.0f);		
+	float4 out_color= float4(1.0f, 1.0f, 1.0f, 1.0f);
+#ifdef ACCUM_PIXEL_HAS_MV
+	g_motion_vector_passthrough = motion_vector;
+#endif
 	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(out_color, true, false);
 }
 
 void static_prt_ambient_vs(
 	in vertex_type vertex,
 	CLIP_OUTPUT
-	out float4 position : SV_Position)
+	out float4 position : SV_Position
+#ifdef ACCUM_PIXEL_HAS_MV
+	, out float2 motion_vector : TEXCOORD10
+#endif
+	)
 {
 	//output to pixel shader
 	float4 local_to_world_transform[3];
 
 	//output to pixel shader
 	always_local_to_view(vertex, local_to_world_transform, position);
-	
+
+#ifdef ACCUM_PIXEL_HAS_MV
+	motion_vector = compute_motion_vector(position, vertex.position);
+#endif
+
 	CALC_CLIP(position);
 }
 
 void static_prt_linear_vs(
 	in vertex_type vertex,
 	CLIP_OUTPUT
-	out float4 position : SV_Position)
+	out float4 position : SV_Position
+#ifdef ACCUM_PIXEL_HAS_MV
+	, out float2 motion_vector : TEXCOORD10
+#endif
+	)
 {
 	//output to pixel shader
 	float4 local_to_world_transform[3];
 
 	//output to pixel shader
 	always_local_to_view(vertex, local_to_world_transform, position);
-	
+
+#ifdef ACCUM_PIXEL_HAS_MV
+	motion_vector = compute_motion_vector(position, vertex.position);
+#endif
+
 	CALC_CLIP(position);
 }
 
 void static_prt_quadratic_vs(
 	in vertex_type vertex,
 	CLIP_OUTPUT
-	out float4 position : SV_Position)
+	out float4 position : SV_Position
+#ifdef ACCUM_PIXEL_HAS_MV
+	, out float2 motion_vector : TEXCOORD10
+#endif
+	)
 {
 	//output to pixel shader
 	float4 local_to_world_transform[3];
 
 	//output to pixel shader
 	always_local_to_view(vertex, local_to_world_transform, position);
-	
+
+#ifdef ACCUM_PIXEL_HAS_MV
+	motion_vector = compute_motion_vector(position, vertex.position);
+#endif
+
 	CALC_CLIP(position);
 }
 
 accum_pixel static_prt_ps(
 	CLIP_INPUT
-	SCREEN_POSITION_INPUT(fragment_position))	
+	SCREEN_POSITION_INPUT(fragment_position)
+#ifdef ACCUM_PIXEL_HAS_MV
+	, in float2 motion_vector : TEXCOORD10
+#endif
+	)
 {
 	float4 out_color= float4(1.0f, 1.0f, 1.0f, 1.0f);
+#ifdef ACCUM_PIXEL_HAS_MV
+	g_motion_vector_passthrough = motion_vector;
+#endif
 	return convert_to_render_target(out_color, true, true);
 }
 
@@ -196,22 +258,37 @@ accum_pixel static_prt_ps(
 void static_sh_vs(
 	in vertex_type vertex,
 	CLIP_OUTPUT
-	out float4 position : SV_Position)
+	out float4 position : SV_Position
+#ifdef ACCUM_PIXEL_HAS_MV
+	, out float2 motion_vector : TEXCOORD10
+#endif
+	)
 {
 	//output to pixel shader
 	float4 local_to_world_transform[3];
 
 	//output to pixel shader
 	always_local_to_view(vertex, local_to_world_transform, position);
-	
+
+#ifdef ACCUM_PIXEL_HAS_MV
+	motion_vector = compute_motion_vector(position, vertex.position);
+#endif
+
 	CALC_CLIP(position);
 }
 
 accum_pixel static_sh_ps(
 	CLIP_INPUT
-	SCREEN_POSITION_INPUT(fragment_position))
+	SCREEN_POSITION_INPUT(fragment_position)
+#ifdef ACCUM_PIXEL_HAS_MV
+	, in float2 motion_vector : TEXCOORD10
+#endif
+	)
 {
 	float4 out_color= float4(1.0f, 1.0f, 1.0f, 1.0f);
+#ifdef ACCUM_PIXEL_HAS_MV
+	g_motion_vector_passthrough = motion_vector;
+#endif
 	return convert_to_render_target(out_color, true, true);
 }
 

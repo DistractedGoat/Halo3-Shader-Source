@@ -4,7 +4,17 @@
 /*
 cook_torrance.fx
 Mon, Jul 25, 2005 5:01pm (haochen)
+
+Modified: GGX/Trowbridge-Reitz NDF + Smith-GGX geometry term
+          replacing original Beckmann distribution.
 */
+
+// Debug: set to 1 to visualize GGX modifications
+// 0 = normal rendering (production)
+// 1 = tint specular bright green to confirm GGX path is active
+// 2 = output roughness as grayscale (debug roughness mapping)
+// 3 = output NDF distribution value as heat map
+#define HALO3_RT_DEBUG_MODE 0
 
 //****************************************************************************
 // Cook Torrance Material Model parameters
@@ -274,7 +284,8 @@ void calc_material_analytic_specular_cook_torrance_ps(
 		float v_dot_h = dot( view_dir, half_vector); 
 		
 		// VH may be negative by numerical errors, so we need saturate(VH)
-		float  geometry_term = 2 * n_dot_h * min_dot / (saturate(v_dot_h) + 0.00001f); // G = saturate(G)
+		// GGX Smith geometry — computed after NDF where alpha is available
+		float  geometry_term;
 		
 		//calculate fresnel term
 		float3 f0= min(specular_albedo_color, 0.999f);
@@ -286,17 +297,33 @@ void calc_material_analytic_specular_cook_torrance_ps(
 		float3 r = (v_dot_h*gpc-1.f) / (v_dot_h*gmc+1.f);
 		specular_fresnel_color= ( 0.5f * ( (gmc*gmc) / (gpc*gpc + 0.00001f) ) * ( 1.f + r*r ));
 		
-		//calculate the distribution term
+		//calculate the GGX distribution term (Trowbridge-Reitz)
 		float t_roughness= max(spatially_varying_material_parameters.a, 0.05f);
-		float m_squared= t_roughness*t_roughness;			
+		float ggx_alpha= t_roughness*t_roughness;
+		float ggx_alpha2= ggx_alpha*ggx_alpha;
 		float cosine_alpha_squared = n_dot_h * n_dot_h;
-		float distribution;
-		distribution= exp((cosine_alpha_squared-1)/(m_squared*cosine_alpha_squared))/(m_squared*cosine_alpha_squared*cosine_alpha_squared+0.00001f);
+		float ggx_denom = cosine_alpha_squared * (ggx_alpha2 - 1.0f) + 1.0f;
+		float distribution = ggx_alpha2 / (3.14159265f * ggx_denom * ggx_denom + 0.00001f);
+		// Smith-GGX geometry term (matched to original combination: D * saturate(G) / (pi * NdotV))
+		float ggx_gv = 2.0f * n_dot_v / (n_dot_v + sqrt(ggx_alpha2 + (1.0f - ggx_alpha2) * n_dot_v * n_dot_v) + 0.00001f);
+		float ggx_gl = 2.0f * n_dot_l / (n_dot_l + sqrt(ggx_alpha2 + (1.0f - ggx_alpha2) * n_dot_l * n_dot_l) + 0.00001f);
+		geometry_term = ggx_gv * ggx_gl;
 		
 		//puting it all together
 		analytic_specular_radiance= distribution * saturate(geometry_term) / (3.14159265 * n_dot_v + 0.00001f) * specular_fresnel_color;
 		analytic_specular_radiance= min(analytic_specular_radiance, vertex_n_dot_l + 1.0f) * light_irradiance;
-		
+
+#if HALO3_RT_DEBUG_MODE == 1
+		// Debug: tint specular green to confirm GGX path is active
+		analytic_specular_radiance= analytic_specular_radiance * float3(0.1f, 3.0f, 0.1f);
+#elif HALO3_RT_DEBUG_MODE == 2
+		// Debug: visualize roughness as grayscale (overrides specular output)
+		analytic_specular_radiance= t_roughness.xxx * light_irradiance;
+#elif HALO3_RT_DEBUG_MODE == 3
+		// Debug: visualize NDF distribution as heat (red=high, blue=low)
+		float heat = saturate(distribution * 0.1f);
+		analytic_specular_radiance= float3(heat, heat * 0.3f, 1.0f - heat) * light_irradiance;
+#endif
 	}
 	else
 	{
@@ -352,7 +379,8 @@ void calc_material_analytic_specular_cook_torrance_two_color_spec_tint_ps(
 		float v_dot_h = dot( view_dir, half_vector); 
 		
 		// VH may be negative by numerical errors, so we need saturate(VH)
-		float  geometry_term = 2 * n_dot_h * min_dot / (saturate(v_dot_h) + 0.00001f); // G = saturate(G)
+		// GGX Smith geometry — computed after NDF where alpha is available
+		float  geometry_term;
 		
 		//calculate fresnel term
 		float3 f0= min(specular_albedo_color, 0.999f);
@@ -364,12 +392,17 @@ void calc_material_analytic_specular_cook_torrance_two_color_spec_tint_ps(
 		float3 r = (v_dot_h*gpc-1.f) / (v_dot_h*gmc+1.f);
 		specular_fresnel_color= ( 0.5f * ( (gmc*gmc) / (gpc*gpc + 0.00001f) ) * ( 1.f + r*r ));
 		
-		//calculate the distribution term
+		//calculate the GGX distribution term (Trowbridge-Reitz)
 		float t_roughness= max(spatially_varying_material_parameters.a, 0.05f);
-		float m_squared= t_roughness*t_roughness;			
+		float ggx_alpha= t_roughness*t_roughness;
+		float ggx_alpha2= ggx_alpha*ggx_alpha;
 		float cosine_alpha_squared = n_dot_h * n_dot_h;
-		float distribution;
-		distribution= exp((cosine_alpha_squared-1)/(m_squared*cosine_alpha_squared))/(m_squared*cosine_alpha_squared*cosine_alpha_squared+0.00001f);
+		float ggx_denom = cosine_alpha_squared * (ggx_alpha2 - 1.0f) + 1.0f;
+		float distribution = ggx_alpha2 / (3.14159265f * ggx_denom * ggx_denom + 0.00001f);
+		// Smith-GGX geometry term (matched to original combination: D * saturate(G) / (pi * NdotV))
+		float ggx_gv = 2.0f * n_dot_v / (n_dot_v + sqrt(ggx_alpha2 + (1.0f - ggx_alpha2) * n_dot_v * n_dot_v) + 0.00001f);
+		float ggx_gl = 2.0f * n_dot_l / (n_dot_l + sqrt(ggx_alpha2 + (1.0f - ggx_alpha2) * n_dot_l * n_dot_l) + 0.00001f);
+		geometry_term = ggx_gv * ggx_gl;
 		
 		//puting it all together
 		analytic_specular_radiance= distribution * saturate(geometry_term) / (3.14159265 * n_dot_v + 0.00001f) * specular_fresnel_color;
@@ -421,7 +454,8 @@ void calc_material_analytic_specular_cook_torrance_pbr_maps_ps(
 		float v_dot_h = dot( view_dir, half_vector); 
 		
 		// VH may be negative by numerical errors, so we need saturate(VH)
-		float  geometry_term = 2 * n_dot_h * min_dot / (saturate(v_dot_h) + 0.00001f); // G = saturate(G)
+		// GGX Smith geometry — computed after NDF where alpha is available
+		float  geometry_term;
 		
 		//calculate fresnel term
 		float3 f0= min(specular_albedo_color, 0.999f);
@@ -433,12 +467,17 @@ void calc_material_analytic_specular_cook_torrance_pbr_maps_ps(
 		float3 r = (v_dot_h*gpc-1.f) / (v_dot_h*gmc+1.f);
 		specular_fresnel_color= ( 0.5f * ( (gmc*gmc) / (gpc*gpc + 0.00001f) ) * ( 1.f + r*r ));
 		
-		//calculate the distribution term
+		//calculate the GGX distribution term (Trowbridge-Reitz)
 		float t_roughness= max(spatially_varying_material_parameters.a, 0.05f);
-		float m_squared= t_roughness*t_roughness;			
+		float ggx_alpha= t_roughness*t_roughness;
+		float ggx_alpha2= ggx_alpha*ggx_alpha;
 		float cosine_alpha_squared = n_dot_h * n_dot_h;
-		float distribution;
-		distribution= exp((cosine_alpha_squared-1)/(m_squared*cosine_alpha_squared))/(m_squared*cosine_alpha_squared*cosine_alpha_squared+0.00001f);
+		float ggx_denom = cosine_alpha_squared * (ggx_alpha2 - 1.0f) + 1.0f;
+		float distribution = ggx_alpha2 / (3.14159265f * ggx_denom * ggx_denom + 0.00001f);
+		// Smith-GGX geometry term (matched to original combination: D * saturate(G) / (pi * NdotV))
+		float ggx_gv = 2.0f * n_dot_v / (n_dot_v + sqrt(ggx_alpha2 + (1.0f - ggx_alpha2) * n_dot_v * n_dot_v) + 0.00001f);
+		float ggx_gl = 2.0f * n_dot_l / (n_dot_l + sqrt(ggx_alpha2 + (1.0f - ggx_alpha2) * n_dot_l * n_dot_l) + 0.00001f);
+		geometry_term = ggx_gv * ggx_gl;
 		
 		//puting it all together
 		analytic_specular_radiance= distribution * saturate(geometry_term) / (3.14159265 * n_dot_v + 0.00001f) * specular_fresnel_color;
@@ -495,7 +534,8 @@ void calc_material_analytic_specular_cook_torrance_custom_cube_ps(
 		float v_dot_h = dot( view_dir, half_vector); 
 		
 		// VH may be negative by numerical errors, so we need saturate(VH)
-		float  geometry_term = 2 * n_dot_h * min_dot / (saturate(v_dot_h) + 0.00001f); // G = saturate(G)
+		// GGX Smith geometry — computed after NDF where alpha is available
+		float  geometry_term;
 		
 		//calculate fresnel term
 		float3 f0= min(specular_albedo_color, 0.999f);
@@ -507,12 +547,17 @@ void calc_material_analytic_specular_cook_torrance_custom_cube_ps(
 		float3 r = (v_dot_h*gpc-1.f) / (v_dot_h*gmc+1.f);
 		specular_fresnel_color= ( 0.5f * ( (gmc*gmc) / (gpc*gpc + 0.00001f) ) * ( 1.f + r*r ));
 		
-		//calculate the distribution term
+		//calculate the GGX distribution term (Trowbridge-Reitz)
 		float t_roughness= max(spatially_varying_material_parameters.a, 0.05f);
-		float m_squared= t_roughness*t_roughness;			
+		float ggx_alpha= t_roughness*t_roughness;
+		float ggx_alpha2= ggx_alpha*ggx_alpha;
 		float cosine_alpha_squared = n_dot_h * n_dot_h;
-		float distribution;
-		distribution= exp((cosine_alpha_squared-1)/(m_squared*cosine_alpha_squared))/(m_squared*cosine_alpha_squared*cosine_alpha_squared+0.00001f);
+		float ggx_denom = cosine_alpha_squared * (ggx_alpha2 - 1.0f) + 1.0f;
+		float distribution = ggx_alpha2 / (3.14159265f * ggx_denom * ggx_denom + 0.00001f);
+		// Smith-GGX geometry term (matched to original combination: D * saturate(G) / (pi * NdotV))
+		float ggx_gv = 2.0f * n_dot_v / (n_dot_v + sqrt(ggx_alpha2 + (1.0f - ggx_alpha2) * n_dot_v * n_dot_v) + 0.00001f);
+		float ggx_gl = 2.0f * n_dot_l / (n_dot_l + sqrt(ggx_alpha2 + (1.0f - ggx_alpha2) * n_dot_l * n_dot_l) + 0.00001f);
+		geometry_term = ggx_gv * ggx_gl;
 		
 		//puting it all together
 		analytic_specular_radiance= distribution * saturate(geometry_term) / (3.14159265 * n_dot_v + 0.00001f) * specular_fresnel_color;
@@ -569,7 +614,8 @@ void calc_material_analytic_specular_cook_torrance_scrolling_cube_mask_ps(
 		float v_dot_h = dot(view_dir, half_vector);
 		
 		// VH may be negative by numerical errors, so we need saturate(VH)
-		float geometry_term = 2 * n_dot_h * min_dot / (saturate(v_dot_h) + 0.00001f); // G = saturate(G)
+		// GGX Smith geometry — computed after NDF where alpha is available
+		float geometry_term;
 		
 		//calculate fresnel term
 		float3 f0 = min(specular_albedo_color, 0.999f);
@@ -581,12 +627,17 @@ void calc_material_analytic_specular_cook_torrance_scrolling_cube_mask_ps(
 		float3 r = (v_dot_h * gpc - 1.f) / (v_dot_h * gmc + 1.f);
 		specular_fresnel_color = (0.5f * ((gmc * gmc) / (gpc * gpc + 0.00001f)) * (1.f + r * r));
 		
-		//calculate the distribution term
+		//calculate the GGX distribution term (Trowbridge-Reitz)
 		float t_roughness = max(spatially_varying_material_parameters.a, 0.05f);
-		float m_squared = t_roughness * t_roughness;
+		float ggx_alpha = t_roughness * t_roughness;
+		float ggx_alpha2 = ggx_alpha * ggx_alpha;
 		float cosine_alpha_squared = n_dot_h * n_dot_h;
-		float distribution;
-		distribution = exp((cosine_alpha_squared - 1) / (m_squared * cosine_alpha_squared)) / (m_squared * cosine_alpha_squared * cosine_alpha_squared + 0.00001f);
+		float ggx_denom = cosine_alpha_squared * (ggx_alpha2 - 1.0f) + 1.0f;
+		float distribution = ggx_alpha2 / (3.14159265f * ggx_denom * ggx_denom + 0.00001f);
+		// Smith-GGX geometry term (matched to original combination: D * saturate(G) / (pi * NdotV))
+		float ggx_gv = 2.0f * n_dot_v / (n_dot_v + sqrt(ggx_alpha2 + (1.0f - ggx_alpha2) * n_dot_v * n_dot_v) + 0.00001f);
+		float ggx_gl = 2.0f * n_dot_l / (n_dot_l + sqrt(ggx_alpha2 + (1.0f - ggx_alpha2) * n_dot_l * n_dot_l) + 0.00001f);
+		geometry_term = ggx_gv * ggx_gl;
 		
 		//puting it all together
 		analytic_specular_radiance = distribution * saturate(geometry_term) / (3.14159265 * n_dot_v + 0.00001f) * specular_fresnel_color;
@@ -643,7 +694,8 @@ void calc_material_analytic_specular_cook_torrance_scrolling_cube_ps(
 		float v_dot_h = dot(view_dir, half_vector);
 		
 		// VH may be negative by numerical errors, so we need saturate(VH)
-		float geometry_term = 2 * n_dot_h * min_dot / (saturate(v_dot_h) + 0.00001f); // G = saturate(G)
+		// GGX Smith geometry — computed after NDF where alpha is available
+		float geometry_term;
 		
 		//calculate fresnel term
 		float3 f0 = min(specular_albedo_color, 0.999f);
@@ -655,12 +707,17 @@ void calc_material_analytic_specular_cook_torrance_scrolling_cube_ps(
 		float3 r = (v_dot_h * gpc - 1.f) / (v_dot_h * gmc + 1.f);
 		specular_fresnel_color = (0.5f * ((gmc * gmc) / (gpc * gpc + 0.00001f)) * (1.f + r * r));
 		
-		//calculate the distribution term
+		//calculate the GGX distribution term (Trowbridge-Reitz)
 		float t_roughness = max(spatially_varying_material_parameters.a, 0.05f);
-		float m_squared = t_roughness * t_roughness;
+		float ggx_alpha = t_roughness * t_roughness;
+		float ggx_alpha2 = ggx_alpha * ggx_alpha;
 		float cosine_alpha_squared = n_dot_h * n_dot_h;
-		float distribution;
-		distribution = exp((cosine_alpha_squared - 1) / (m_squared * cosine_alpha_squared)) / (m_squared * cosine_alpha_squared * cosine_alpha_squared + 0.00001f);
+		float ggx_denom = cosine_alpha_squared * (ggx_alpha2 - 1.0f) + 1.0f;
+		float distribution = ggx_alpha2 / (3.14159265f * ggx_denom * ggx_denom + 0.00001f);
+		// Smith-GGX geometry term (matched to original combination: D * saturate(G) / (pi * NdotV))
+		float ggx_gv = 2.0f * n_dot_v / (n_dot_v + sqrt(ggx_alpha2 + (1.0f - ggx_alpha2) * n_dot_v * n_dot_v) + 0.00001f);
+		float ggx_gl = 2.0f * n_dot_l / (n_dot_l + sqrt(ggx_alpha2 + (1.0f - ggx_alpha2) * n_dot_l * n_dot_l) + 0.00001f);
+		geometry_term = ggx_gv * ggx_gl;
 		
 		//puting it all together
 		analytic_specular_radiance = distribution * saturate(geometry_term) / (3.14159265 * n_dot_v + 0.00001f) * specular_fresnel_color;
@@ -717,7 +774,8 @@ void calc_material_analytic_specular_cook_torrance_from_albedo_ps(
 		float v_dot_h = dot(view_dir, half_vector);
 		
 		// VH may be negative by numerical errors, so we need saturate(VH)
-		float geometry_term = 2 * n_dot_h * min_dot / (saturate(v_dot_h) + 0.00001f); // G = saturate(G)
+		// GGX Smith geometry — computed after NDF where alpha is available
+		float geometry_term;
 		
 		//calculate fresnel term
 		float3 f0 = min(specular_albedo_color, 0.999f);
@@ -729,12 +787,17 @@ void calc_material_analytic_specular_cook_torrance_from_albedo_ps(
 		float3 r = (v_dot_h * gpc - 1.f) / (v_dot_h * gmc + 1.f);
 		specular_fresnel_color = (0.5f * ((gmc * gmc) / (gpc * gpc + 0.00001f)) * (1.f + r * r));
 		
-		//calculate the distribution term
+		//calculate the GGX distribution term (Trowbridge-Reitz)
 		float t_roughness = max(spatially_varying_material_parameters.a, 0.05f);
-		float m_squared = t_roughness * t_roughness;
+		float ggx_alpha = t_roughness * t_roughness;
+		float ggx_alpha2 = ggx_alpha * ggx_alpha;
 		float cosine_alpha_squared = n_dot_h * n_dot_h;
-		float distribution;
-		distribution = exp((cosine_alpha_squared - 1) / (m_squared * cosine_alpha_squared)) / (m_squared * cosine_alpha_squared * cosine_alpha_squared + 0.00001f);
+		float ggx_denom = cosine_alpha_squared * (ggx_alpha2 - 1.0f) + 1.0f;
+		float distribution = ggx_alpha2 / (3.14159265f * ggx_denom * ggx_denom + 0.00001f);
+		// Smith-GGX geometry term (matched to original combination: D * saturate(G) / (pi * NdotV))
+		float ggx_gv = 2.0f * n_dot_v / (n_dot_v + sqrt(ggx_alpha2 + (1.0f - ggx_alpha2) * n_dot_v * n_dot_v) + 0.00001f);
+		float ggx_gl = 2.0f * n_dot_l / (n_dot_l + sqrt(ggx_alpha2 + (1.0f - ggx_alpha2) * n_dot_l * n_dot_l) + 0.00001f);
+		geometry_term = ggx_gv * ggx_gl;
 		
 		//puting it all together
 		analytic_specular_radiance = distribution * saturate(geometry_term) / (3.14159265 * n_dot_v + 0.00001f) * specular_fresnel_color;
@@ -794,7 +857,8 @@ void calc_material_analytic_specular_cook_torrance_rim_fresnel_ps(
 		float v_dot_h = dot( view_dir, half_vector); 
 		
 		// VH may be negative by numerical errors, so we need saturate(VH)
-		float  geometry_term = 2 * n_dot_h * min_dot / (saturate(v_dot_h) + 0.00001f); // G = saturate(G)
+		// GGX Smith geometry — computed after NDF where alpha is available
+		float  geometry_term;
 		
 		//calculate fresnel term
 		float3 f0= min(specular_albedo_color, 0.999f);
@@ -806,12 +870,17 @@ void calc_material_analytic_specular_cook_torrance_rim_fresnel_ps(
 		float3 r = (v_dot_h*gpc-1.f) / (v_dot_h*gmc+1.f);
 		specular_fresnel_color= ( 0.5f * ( (gmc*gmc) / (gpc*gpc + 0.00001f) ) * ( 1.f + r*r ));
 		
-		//calculate the distribution term
+		//calculate the GGX distribution term (Trowbridge-Reitz)
 		float t_roughness= max(spatially_varying_material_parameters.a, 0.05f);
-		float m_squared= t_roughness*t_roughness;			
+		float ggx_alpha= t_roughness*t_roughness;
+		float ggx_alpha2= ggx_alpha*ggx_alpha;
 		float cosine_alpha_squared = n_dot_h * n_dot_h;
-		float distribution;
-		distribution= exp((cosine_alpha_squared-1)/(m_squared*cosine_alpha_squared))/(m_squared*cosine_alpha_squared*cosine_alpha_squared+0.00001f);
+		float ggx_denom = cosine_alpha_squared * (ggx_alpha2 - 1.0f) + 1.0f;
+		float distribution = ggx_alpha2 / (3.14159265f * ggx_denom * ggx_denom + 0.00001f);
+		// Smith-GGX geometry term (matched to original combination: D * saturate(G) / (pi * NdotV))
+		float ggx_gv = 2.0f * n_dot_v / (n_dot_v + sqrt(ggx_alpha2 + (1.0f - ggx_alpha2) * n_dot_v * n_dot_v) + 0.00001f);
+		float ggx_gl = 2.0f * n_dot_l / (n_dot_l + sqrt(ggx_alpha2 + (1.0f - ggx_alpha2) * n_dot_l * n_dot_l) + 0.00001f);
+		geometry_term = ggx_gv * ggx_gl;
 		
 		//puting it all together
 		analytic_specular_radiance= distribution * saturate(geometry_term) / (3.14159265 * n_dot_v + 0.00001f) * specular_fresnel_color;

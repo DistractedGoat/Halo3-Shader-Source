@@ -122,6 +122,7 @@ enum
 	k_shader_pc_specular_enabled=	95,
 	k_shader_pc_albedo_lighting=	96,
 #endif // pc
+
 };
 
 // pixel shader actual constants
@@ -139,6 +140,7 @@ enum
 {
 	k_vs_sampler_atmosphere_neta_table= 0,
 	k_vs_sampler_weather_occlusion,	// can go in oneshot if necessary
+	k_vs_sampler_prev_vp_matrix,	// halo3-ng: previous VP matrix for motion vectors
 	k_number_of_vs_sampler,
 };
 

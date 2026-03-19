@@ -45,6 +45,8 @@ PARAM(float3, bloom_override);
 #include "render_target.fx"
 #include "albedo_pass.fx"
 
+#include "motion_vectors.fx"
+
 
 #undef CONVERT_TO_RENDER_TARGET_FOR_BLEND
 #define CONVERT_TO_RENDER_TARGET_FOR_BLEND convert_to_render_target
@@ -260,6 +262,9 @@ struct static_prt_vsout
 #ifdef misc_attr_define
 	float4 misc						: TEXCOORD9;
 #endif
+#ifdef ACCUM_PIXEL_HAS_MV
+	float2 motion_vector			: TEXCOORD10;
+#endif
 };
 
 static_prt_vsout static_prt_ambient_vs(
@@ -346,6 +351,10 @@ static_prt_vsout static_prt_ambient_vs(
 
 	vsout.clip_distance = dot(vsout.position, v_clip_plane);
 
+#ifdef ACCUM_PIXEL_HAS_MV
+	vsout.motion_vector = compute_motion_vector(vsout.position, vertex.position);
+#endif
+
 	return vsout;
 }
 
@@ -392,10 +401,14 @@ accum_pixel static_prt_ps(
 		vsout.extinction,
 		vsout.inscatter,
 		misc);
-			
+
+#ifdef ACCUM_PIXEL_HAS_MV
+	g_motion_vector_passthrough = vsout.motion_vector;
+#endif
+
 	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(out_color, true, false);
 }
-	
+
 struct static_sh_vsout
 {
 	float4 position					: SV_Position;
@@ -409,6 +422,9 @@ struct static_sh_vsout
 	float4 inscatter				: COLOR1;
 #ifdef misc_attr_define
 	float4 misc						: TEXCOORD9;
+#endif
+#ifdef ACCUM_PIXEL_HAS_MV
+	float2 motion_vector			: TEXCOORD10;
 #endif
 };
 
@@ -444,6 +460,10 @@ static_sh_vsout static_sh_vs(
 	compute_scattering(Camera_Position, vertex.position, vsout.extinction, vsout.inscatter.xyz);
 	
 	vsout.clip_distance = dot(vsout.position, v_clip_plane);
+
+#ifdef ACCUM_PIXEL_HAS_MV
+	vsout.motion_vector = compute_motion_vector(vsout.position, vertex.position);
+#endif
 
 	return vsout;
 }
@@ -493,7 +513,11 @@ accum_pixel static_sh_ps(
 		vsout.extinction,
 		vsout.inscatter,
 		misc);
-			
+
+#ifdef ACCUM_PIXEL_HAS_MV
+	g_motion_vector_passthrough = vsout.motion_vector;
+#endif
+
 	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(out_color, true, false);
 }
 
@@ -607,8 +631,12 @@ accum_pixel active_camo_ps(
 	
 	float3 true_scene_color= lerp(color_transparency.rgb, ldr_color.rgb, saturate(color_transparency.a + saturate(1.0f-transparency)));
 	float4 result= float4(true_scene_color, 1.0f);
-	
-	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(result, false, false);	
+
+#ifdef ACCUM_PIXEL_HAS_MV
+	g_motion_vector_passthrough = vsout.motion_vector;
+#endif
+
+	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(result, false, false);
 }
 
 struct albedo_vsout

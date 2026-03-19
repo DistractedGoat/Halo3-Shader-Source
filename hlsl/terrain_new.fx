@@ -21,6 +21,7 @@
 
 #include "lightmap_sampling.fx"
 #include "dynamic_light_clip.fx"
+#include "motion_vectors.fx"
 
 #define DETAIL_MULTIPLIER 4.59479f
 
@@ -563,7 +564,11 @@ void static_per_pixel_vs(
 	out float4 lightmap_texcoord : TEXCOORD4,
 	out float3 fragment_to_camera_world : TEXCOORD5,
 	out float3 extinction : COLOR0,
-	out float3 inscatter : COLOR1)
+	out float3 inscatter : COLOR1
+#ifdef ACCUM_PIXEL_HAS_MV
+	,out float2 motion_vector : TEXCOORD10
+#endif
+)
 {
 	float4 local_to_world_transform_UNUSED[3];
 	float4 normal4 = float4(normal.xyz,1);
@@ -572,7 +577,10 @@ void static_per_pixel_vs(
 	lightmap_texcoord= float4(lightmap.texcoord, 0, 0);
 
 	compute_scattering(Camera_Position, vertex.position, extinction, inscatter);
-	
+
+#ifdef ACCUM_PIXEL_HAS_MV
+	motion_vector = compute_motion_vector(position, vertex.position);
+#endif
 	clip_distance = dot(position, v_clip_plane);
 }
 
@@ -1033,8 +1041,15 @@ accum_pixel static_per_pixel_ps(
 	in float4 lightmap_texcoord : TEXCOORD4_centroid,
 	in float3 fragment_to_camera_world : TEXCOORD5,
 	in float3 extinction : COLOR0,
-	in float3 inscatter : COLOR1)
-{	
+	in float3 inscatter : COLOR1
+#ifdef ACCUM_PIXEL_HAS_MV
+	,in float2 motion_vector : TEXCOORD10
+#endif
+)
+{
+#ifdef ACCUM_PIXEL_HAS_MV
+	g_motion_vector_passthrough = motion_vector;
+#endif
 	entry_point_data data;
 	BUILD_ENTRY_POINT_DATA(data);
 
@@ -1075,8 +1090,12 @@ void static_per_vertex_vs(
 	out float4 probe0_3_g : TEXCOORD6,
 	out float4 probe0_3_b : TEXCOORD7,
 	out float3 dominant_light_intensity : TEXCOORD8,
-	out float4 extinction : COLOR0) // w contains inscatter.z
-//	out float3 inscatter : COLOR1)
+	out float4 extinction : COLOR0 // w contains inscatter.z
+//	out float3 inscatter : COLOR1
+#ifdef ACCUM_PIXEL_HAS_MV
+	,out float2 motion_vector : TEXCOORD10
+#endif
+)
 {
    // on PC vertex lightnap is stored in unsigned format
    // convert to signed
@@ -1088,36 +1107,39 @@ void static_per_vertex_vs(
 
 	float4 local_to_world_transform_UNUSED[3];
 	float4 normal4 = float4(normal.xyz,1);
-	default_vertex_transform_vs(vertex, position, texcoord.xy, normal4, binormal, tangent, fragment_to_camera_world, local_to_world_transform_UNUSED);	
+	default_vertex_transform_vs(vertex, position, texcoord.xy, normal4, binormal, tangent, fragment_to_camera_world, local_to_world_transform_UNUSED);
 	normal = normal4.xyz;
 	//const real exponent_mult= 127.f/pow(2.f, fractional_exponent_bits); == 31.75f
-	
+
 	float scale= exp2(light_intensity.a * 31.75f);
 	light_intensity.rgb*= scale;
-	
+
 	scale= exp2(c0_3_rgbe.a * 31.75f);
 	c0_3_rgbe.rgb*= scale;
-	
+
 	scale= exp2(c1_1_rgbe.a * 31.75f);
 	c1_1_rgbe.rgb*= scale;
 
 	scale= exp2(c1_2_rgbe.a * 31.75f);
 	c1_2_rgbe.rgb*= scale;
-	
+
 	scale= exp2(c1_3_rgbe.a * 31.75f);
 	c1_3_rgbe.rgb*= scale;
-		
+
 	probe0_3_r= float4(c0_3_rgbe.r, c1_1_rgbe.r, c1_2_rgbe.r, c1_3_rgbe.r);
 	probe0_3_g= float4(c0_3_rgbe.g, c1_1_rgbe.g, c1_2_rgbe.g, c1_3_rgbe.g);
 	probe0_3_b= float4(c0_3_rgbe.b, c1_1_rgbe.b, c1_2_rgbe.b, c1_3_rgbe.b);
-	
+
 	dominant_light_intensity= light_intensity.xyz;
-	
+
 	float3 inscatter;
 	compute_scattering(Camera_Position, vertex.position, extinction.xyz, inscatter);
 	texcoord.zw  = inscatter.xy;
 	extinction.w = inscatter.z;
 
+#ifdef ACCUM_PIXEL_HAS_MV
+	motion_vector = compute_motion_vector(position, vertex.position);
+#endif
 	clip_distance = dot(position, v_clip_plane);
 }
 
@@ -1134,9 +1156,16 @@ accum_pixel static_per_vertex_ps(
 	in float4 p0_3_g : TEXCOORD6,
 	in float4 p0_3_b : TEXCOORD7,
 	in float3 dominant_light_intensity : TEXCOORD8,
-	in float4 extinction : COLOR0) // w contains inscatter.z
-//	in float3 inscatter : COLOR1)
+	in float4 extinction : COLOR0 // w contains inscatter.z
+//	in float3 inscatter : COLOR1
+#ifdef ACCUM_PIXEL_HAS_MV
+	,in float2 motion_vector : TEXCOORD10
+#endif
+)
 {
+#ifdef ACCUM_PIXEL_HAS_MV
+	g_motion_vector_passthrough = motion_vector;
+#endif
 	entry_point_data data;
 	BUILD_ENTRY_POINT_DATA(data);
 
@@ -1170,13 +1199,20 @@ void static_sh_vs(
 	out float3 tangent : TEXCOORD3,
 	out float3 fragment_to_camera_world : TEXCOORD4,
 	out float3 extinction : COLOR0,
-	out float3 inscatter : COLOR1)
+	out float3 inscatter : COLOR1
+#ifdef ACCUM_PIXEL_HAS_MV
+	,out float2 motion_vector : TEXCOORD10
+#endif
+)
 {
 	float4 local_to_world_transform_UNUSED[3];
 	float4 normal4 = float4(normal.xyz,1);
 	default_vertex_transform_vs(vertex, position, texcoord, normal4, binormal, tangent, fragment_to_camera_world, local_to_world_transform_UNUSED);
 	normal = normal4.xyz;
 	compute_scattering(Camera_Position, vertex.position, extinction, inscatter);
+#ifdef ACCUM_PIXEL_HAS_MV
+	motion_vector = compute_motion_vector(position, vertex.position);
+#endif
 	clip_distance = dot(position, v_clip_plane);
 }
 
@@ -1190,8 +1226,15 @@ accum_pixel static_sh_ps(
 	in float3 tangent : TEXCOORD3,
 	in float3 fragment_to_camera_world : TEXCOORD4,
 	in float3 extinction : COLOR0,
-	in float3 inscatter : COLOR1)
+	in float3 inscatter : COLOR1
+#ifdef ACCUM_PIXEL_HAS_MV
+	,in float2 motion_vector : TEXCOORD10
+#endif
+)
 {
+#ifdef ACCUM_PIXEL_HAS_MV
+	g_motion_vector_passthrough = motion_vector;
+#endif
 	entry_point_data data;
 	BUILD_ENTRY_POINT_DATA(data);
 	return static_lighting_shared_ps_quadratic(
@@ -1283,7 +1326,11 @@ void static_prt_quadratic_vs(
 	out float3 fragment_to_camera_world : TEXCOORD4,
 	out float4 prt_ravi_diff : TEXCOORD5,
 	out float3 extinction : COLOR0,
-	out float3 inscatter : COLOR1)
+	out float3 inscatter : COLOR1
+#ifdef ACCUM_PIXEL_HAS_MV
+	,out float2 motion_vector : TEXCOORD10
+#endif
+)
 {
 	float4 local_to_world_transform[3];
 	float4 normal4 = float4(normal.xyz,1);
@@ -1297,9 +1344,12 @@ void static_prt_quadratic_vs(
 		normal,
 		local_to_world_transform,
 		prt_ravi_diff);
-	
+
 	compute_scattering(Camera_Position, vertex.position, extinction, inscatter);
-	
+
+#ifdef ACCUM_PIXEL_HAS_MV
+	motion_vector = compute_motion_vector(position, vertex.position);
+#endif
 	clip_distance = dot(position, v_clip_plane);
 }
 #endif	// ENTRY_POINT_static_prt_quadratic
@@ -1318,7 +1368,11 @@ void static_prt_linear_vs(
 	out float3 fragment_to_camera_world : TEXCOORD4,
 	out float4 prt_ravi_diff : TEXCOORD5,
 	out float3 extinction : COLOR0,
-	out float3 inscatter : COLOR1)
+	out float3 inscatter : COLOR1
+#ifdef ACCUM_PIXEL_HAS_MV
+	,out float2 motion_vector : TEXCOORD10
+#endif
+)
 {
 	float4 local_to_world_transform[3];
 	float4 normal4 = float4(normal.xyz,1);
@@ -1327,7 +1381,7 @@ void static_prt_linear_vs(
    // on PC vertex linear PRT data is stored in unsigned format convert to signed
 	prt_c0_c3 = 2 * prt_c0_c3 - 1;
 
-	{	
+	{
 		// new monochrome PRT/RAVI ratio calculation
 		// convert to monochrome
 		float4 prt_c0_c3_monochrome= prt_c0_c3;
@@ -1335,16 +1389,16 @@ void static_prt_linear_vs(
 		SH_monochrome_3120.xyz= (v_lighting_constant_1.xyz + v_lighting_constant_2.xyz + v_lighting_constant_3.xyz) / 3.0f;		// ###ctchou $PERF convert to monochrome before setting the constants yo
 		SH_monochrome_3120.w= dot(v_lighting_constant_0.xyz, float3(1.0f/3.0f, 1.0f/3.0f, 1.0f/3.0f));
 
-		//rotate the first 4 coefficients	
+		//rotate the first 4 coefficients
 		float4 SH_monochrome_local_0123;
 		sh_inverse_rotate_0123_monochrome(
 			local_to_world_transform,
 			SH_monochrome_3120,
 			SH_monochrome_local_0123);
-			
-		float prt_mono=		dot(SH_monochrome_local_0123, prt_c0_c3_monochrome);		
+
+		float prt_mono=		dot(SH_monochrome_local_0123, prt_c0_c3_monochrome);
 		float ravi_mono= ravi_order_2_monochromatic(normal, SH_monochrome_3120);
-			
+
 		prt_mono= max(prt_mono, 0.01f);													// clamp prt term to be positive
 		ravi_mono= max(ravi_mono, 0.01f);									// clamp ravi term to be larger than prt term by a little bit
 		float prt_ravi_ratio= prt_mono / ravi_mono;
@@ -1352,9 +1406,12 @@ void static_prt_linear_vs(
 		prt_ravi_diff.y= prt_mono;														// unused
 		prt_ravi_diff.z= (prt_c0_c3_monochrome.x * 3.1415926535f)/0.886227f;			// specular occlusion % (ambient occlusion)
 		prt_ravi_diff.w= min(dot(normal, get_constant_analytical_light_dir_vs()), prt_mono);		// specular (vertex N) dot L (kills backfacing specular)
-	}	
+	}
 	compute_scattering(Camera_Position, vertex.position, extinction, inscatter);
 
+#ifdef ACCUM_PIXEL_HAS_MV
+	motion_vector = compute_motion_vector(position, vertex.position);
+#endif
 	clip_distance = dot(position, v_clip_plane);
 }
 #endif	// ENTRY_POINT_static_prt_linear
@@ -1373,7 +1430,11 @@ void static_prt_ambient_vs(
 	out float3 fragment_to_camera_world : TEXCOORD4,
 	out float4 prt_ravi_diff : TEXCOORD5,
 	out float3 extinction : COLOR0,
-	out float3 inscatter : COLOR1)
+	out float3 inscatter : COLOR1
+#ifdef ACCUM_PIXEL_HAS_MV
+	,out float2 motion_vector : TEXCOORD10
+#endif
+)
 {
 	float4 local_to_world_transform[3];
 	float4 normal4 = float4(normal.xyz,1);
@@ -1386,7 +1447,7 @@ void static_prt_ambient_vs(
 		float lighting_c0= 	dot(v_lighting_constant_0.xyz, float3(1.0f/3.0f, 1.0f/3.0f, 1.0f/3.0f));			// ###ctchou $PERF convert to monochrome before passing in!
 		float ravi_mono= (0.886227f * lighting_c0)/3.1415926535f;
 		float prt_mono= ambient_occlusion * lighting_c0;
-			
+
 		prt_mono= max(prt_mono, 0.01f);													// clamp prt term to be positive
 		ravi_mono= max(ravi_mono, 0.01f);									// clamp ravi term to be larger than prt term by a little bit
 		float prt_ravi_ratio= prt_mono /ravi_mono;
@@ -1395,9 +1456,12 @@ void static_prt_ambient_vs(
 		prt_ravi_diff.z= (ambient_occlusion * 3.1415926535f)/0.886227f;					// specular occlusion % (ambient occlusion)
 		prt_ravi_diff.w= min(dot(normal, get_constant_analytical_light_dir_vs()), prt_mono);		// specular (vertex N) dot L (kills backfacing specular)
 	}
-		
+
 	compute_scattering(Camera_Position, vertex.position, extinction, inscatter);
 
+#ifdef ACCUM_PIXEL_HAS_MV
+	motion_vector = compute_motion_vector(position, vertex.position);
+#endif
 	clip_distance = dot(position, v_clip_plane);
 }
 #endif	// ENTRY_POINT_static_prt_quadratic
@@ -1416,8 +1480,15 @@ accum_pixel static_prt_ps(
 	in float3 fragment_to_camera_world : TEXCOORD4,
 	in float4 prt_ravi_diff : TEXCOORD5,
 	in float3 extinction : COLOR0,
-	in float3 inscatter : COLOR1)
+	in float3 inscatter : COLOR1
+#ifdef ACCUM_PIXEL_HAS_MV
+	,in float2 motion_vector : TEXCOORD10
+#endif
+)
 {
+#ifdef ACCUM_PIXEL_HAS_MV
+	g_motion_vector_passthrough = motion_vector;
+#endif
 	entry_point_data data;
 	BUILD_ENTRY_POINT_DATA(data);
 	return static_lighting_shared_ps_quadratic(
@@ -1448,7 +1519,11 @@ void default_dynamic_light_vs(
 	out float3 fragment_to_camera_world : TEXCOORD4,
 	out float4 fragment_position_shadow : TEXCOORD5,
 	out float3 extinction : COLOR0,
-	out float3 inscatter : COLOR1)				// homogenous coordinates of the fragment position in projective shadow space)
+	out float3 inscatter : COLOR1				// homogenous coordinates of the fragment position in projective shadow space)
+#ifdef ACCUM_PIXEL_HAS_MV
+	,out float2 motion_vector : TEXCOORD10
+#endif
+)
 {
 	//output to pixel shader
 	float4 local_to_world_transform[3];
@@ -1462,11 +1537,14 @@ void default_dynamic_light_vs(
 	binormal= vertex.binormal;
 	// world space vector from vertex to eye/camera
 	fragment_to_camera_world= Camera_Position - vertex.position;
-		
-	fragment_position_shadow= mul(float4(vertex.position, 1.0f), Shadow_Projection);		
-	
-	compute_scattering(Camera_Position, vertex.position, extinction, inscatter);		
 
+	fragment_position_shadow= mul(float4(vertex.position, 1.0f), Shadow_Projection);
+
+	compute_scattering(Camera_Position, vertex.position, extinction, inscatter);
+
+#ifdef ACCUM_PIXEL_HAS_MV
+	motion_vector = compute_motion_vector(position, vertex.position);
+#endif
 	clip_distance = calc_dynamic_light_clip_distance(position);
 }
 
@@ -1481,20 +1559,28 @@ void dynamic_light_vs(
 	out float3 fragment_to_camera_world : TEXCOORD4,
 	out float4 fragment_position_shadow : TEXCOORD5,
 	out float3 extinction : COLOR0,
-	out float3 inscatter : COLOR1)		// homogenous coordinates of the fragment position in projective shadow space)
+	out float3 inscatter : COLOR1		// homogenous coordinates of the fragment position in projective shadow space)
+#ifdef ACCUM_PIXEL_HAS_MV
+	,out float2 motion_vector : TEXCOORD10
+#endif
+)
 {
 	default_dynamic_light_vs(
-		vertex, 
-		position, 
+		vertex,
+		position,
 		clip_distance,
-		texcoord, 
-		normal, 
-		binormal, 
-		tangent, 
-		fragment_to_camera_world, 
-		fragment_position_shadow, 
-		extinction, 
-		inscatter);
+		texcoord,
+		normal,
+		binormal,
+		tangent,
+		fragment_to_camera_world,
+		fragment_position_shadow,
+		extinction,
+		inscatter
+#ifdef ACCUM_PIXEL_HAS_MV
+		,motion_vector
+#endif
+	);
 }
 
 void dynamic_light_cine_vs(
@@ -1508,20 +1594,28 @@ void dynamic_light_cine_vs(
 	out float3 fragment_to_camera_world : TEXCOORD4,
 	out float4 fragment_position_shadow : TEXCOORD5,
 	out float3 extinction : COLOR0,
-	out float3 inscatter : COLOR1)		// homogenous coordinates of the fragment position in projective shadow space)
+	out float3 inscatter : COLOR1		// homogenous coordinates of the fragment position in projective shadow space)
+#ifdef ACCUM_PIXEL_HAS_MV
+	,out float2 motion_vector : TEXCOORD10
+#endif
+)
 {
 	default_dynamic_light_vs(
-		vertex, 
-		position, 
+		vertex,
+		position,
 		clip_distance,
-		texcoord, 
-		normal, 
-		binormal, 
-		tangent, 
-		fragment_to_camera_world, 
-		fragment_position_shadow, 
-		extinction, 
-		inscatter);
+		texcoord,
+		normal,
+		binormal,
+		tangent,
+		fragment_to_camera_world,
+		fragment_position_shadow,
+		extinction,
+		inscatter
+#ifdef ACCUM_PIXEL_HAS_MV
+		,motion_vector
+#endif
+	);
 }
 
 #ifdef PIXEL_SHADER
@@ -1536,8 +1630,14 @@ accum_pixel default_dynamic_light_ps(
 	in float4 fragment_position_shadow : TEXCOORD5,
 	in float3 extinction : COLOR0,
 	in float3 inscatter : COLOR1,		// homogenous coordinates of the fragment position in projective shadow space
+#ifdef ACCUM_PIXEL_HAS_MV
+	in float2 motion_vector : TEXCOORD10,
+#endif
 	bool cinematic)
 {
+#ifdef ACCUM_PIXEL_HAS_MV
+	g_motion_vector_passthrough = motion_vector;
+#endif
 	// get blend values
 	float4 blend= sample_blend_normalized_for_lighting(texcoord);
 	
@@ -1672,19 +1772,26 @@ accum_pixel dynamic_light_ps(
 	in float3 fragment_to_camera_world : TEXCOORD4,
 	in float4 fragment_position_shadow : TEXCOORD5,
 	in float3 extinction : COLOR0,
-	in float3 inscatter : COLOR1)		// homogenous coordinates of the fragment position in projective shadow space
+	in float3 inscatter : COLOR1		// homogenous coordinates of the fragment position in projective shadow space
+#ifdef ACCUM_PIXEL_HAS_MV
+	,in float2 motion_vector : TEXCOORD10
+#endif
+)
 {
 	return default_dynamic_light_ps(
-		fragment_position, 
+		fragment_position,
 		clip_distance,
-		texcoord, 
-		normal, 
-		binormal, 
-		tangent, 
-		fragment_to_camera_world, 
-		fragment_position_shadow, 
-		extinction, 
-		inscatter, 
+		texcoord,
+		normal,
+		binormal,
+		tangent,
+		fragment_to_camera_world,
+		fragment_position_shadow,
+		extinction,
+		inscatter,
+#ifdef ACCUM_PIXEL_HAS_MV
+		motion_vector,
+#endif
 		false);
 }
 
@@ -1698,19 +1805,26 @@ accum_pixel dynamic_light_cine_ps(
 	in float3 fragment_to_camera_world : TEXCOORD4,
 	in float4 fragment_position_shadow : TEXCOORD5,
 	in float3 extinction : COLOR0,
-	in float3 inscatter : COLOR1)		// homogenous coordinates of the fragment position in projective shadow space
+	in float3 inscatter : COLOR1		// homogenous coordinates of the fragment position in projective shadow space
+#ifdef ACCUM_PIXEL_HAS_MV
+	,in float2 motion_vector : TEXCOORD10
+#endif
+)
 {
 	return default_dynamic_light_ps(
-		fragment_position, 
+		fragment_position,
 		clip_distance,
-		texcoord, 
-		normal, 
-		binormal, 
-		tangent, 
-		fragment_to_camera_world, 
-		fragment_position_shadow, 
-		extinction, 
-		inscatter, 
+		texcoord,
+		normal,
+		binormal,
+		tangent,
+		fragment_to_camera_world,
+		fragment_position_shadow,
+		extinction,
+		inscatter,
+#ifdef ACCUM_PIXEL_HAS_MV
+		motion_vector,
+#endif
 		true);
 }
 

@@ -2,6 +2,19 @@
 #define _RENDER_TARGET_FX_
 
 #include "utilities.fx"
+// Debug: set to 1 to tint ALL output green (confirms shaders are recompiled and loaded)
+// Set back to 0 for normal rendering
+#define HALO3_RT_OUTPUT_DEBUG 0
+
+// halo3-ng: MV output gating
+// Shaders that define NO_MV_OUTPUT (shadow_apply*.hlsl) skip SV_Target2
+#if defined(ENABLE_MOTION_VECTORS) && !defined(NO_MV_OUTPUT)
+#define ACCUM_PIXEL_HAS_MV 1
+#endif
+
+#ifdef ACCUM_PIXEL_HAS_MV
+static float2 g_motion_vector_passthrough = float2(0, 0);
+#endif
 
 // our output format
 struct accum_pixel
@@ -15,6 +28,9 @@ struct accum_pixel
 	   float4 color : SV_Target0;			// LDR buffer output -> render target 0
    #ifndef LDR_ONLY
 	   float4 dark_color : SV_Target1;		// HDR buffer output -> render target 1
+   #endif
+   #ifdef ACCUM_PIXEL_HAS_MV
+	   float2 motion_vector : SV_Target2;	// motion vectors -> render target 2 (halo3-ng)
    #endif
 #endif
 };
@@ -31,6 +47,10 @@ struct accum_pixel
 		color.rgb= max(color.rgb, float3(0.0f, 0.0f, 0.0f));
 	}
 	accum_pixel result;
+#if HALO3_RT_OUTPUT_DEBUG == 1
+	// Debug: unmistakable green tint on ALL pixels to confirm shader is loaded
+	color.rgb = color.rgb * float3(0.3f, 1.0f, 0.3f);
+#endif
 	result.color.rgb= color.rgb;
 	result.color.a= color.a * LDR_ALPHA_ADJUST;
 
@@ -54,6 +74,10 @@ struct accum_pixel
 	{
 		result.dark_color.rgb= safe_sqrt(result.dark_color.rgb);
 	}
+#endif
+
+#ifdef ACCUM_PIXEL_HAS_MV
+	result.motion_vector = g_motion_vector_passthrough;
 #endif
 
 	return result;

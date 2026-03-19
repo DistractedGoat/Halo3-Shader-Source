@@ -1,3 +1,6 @@
+// halo3-ng: holograms are volumetric effects, not scene geometry — no motion vectors
+#define NO_MV_OUTPUT 1
+
 // .halogram is basically the same as .shader, except it has several hardcoded categories:
 //      albedo                  as .shader
 //      bump_mapping            NONE

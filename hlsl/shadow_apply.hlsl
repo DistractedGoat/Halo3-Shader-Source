@@ -1,5 +1,8 @@
 //#line 2 "source\rasterizer\hlsl\shadow_apply.hlsl"
 
+// halo3-ng: shadow_apply is a darken pass — don't write motion vectors to SV_Target2
+#define NO_MV_OUTPUT 1
+
 #include "global.fx"
 #include "hlsl_constant_mapping.fx"
 #include "deform.fx"

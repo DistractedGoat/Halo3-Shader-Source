@@ -1,0 +1,66 @@
+#line 2 "source\rasterizer\hlsl\rigid.hlsl"
+
+// Rigid geometry vertex shader — reconstructed from original DXBC disassembly
+// Uses hlsl_constant_mapping for proper CB registration (ViewVS, VertexCompressionVS, SkinningVS)
+
+#include "global.fx"
+#include "hlsl_constant_mapping.fx"
+
+//@generate rigid
+//@entry default
+//@entry albedo
+
+// Custom input layout matching original rigid shader (POSITION + TEXCOORD + COLOR)
+struct rigid_input
+{
+    float3 position : POSITION;
+    float2 texcoord : TEXCOORD0;
+    float4 color    : COLOR0;
+};
+
+struct rigid_output
+{
+    float4 position : SV_Position;
+    float2 texcoord : TEXCOORD0;
+    float4 color    : TEXCOORD1;
+};
+
+rigid_output default_vs(rigid_input IN)
+{
+    rigid_output OUT;
+    float4 pos = float4(IN.position * Position_Compression_Scale.xyz + Position_Compression_Offset.xyz, 1.0f);
+    float4 world;
+    world.x = dot(pos, Nodes[0][0]);
+    world.y = dot(pos, Nodes[0][1]);
+    world.z = dot(pos, Nodes[0][2]);
+    world.w = 1.0f;
+    OUT.position = mul(world, View_Projection);
+    OUT.texcoord = IN.texcoord;
+    OUT.color = IN.color;
+    return OUT;
+}
+
+float4 default_ps(rigid_output IN) : SV_Target0
+{
+    return IN.color;
+}
+
+rigid_output albedo_vs(rigid_input IN)
+{
+    rigid_output OUT;
+    float4 pos = float4(IN.position * Position_Compression_Scale.xyz + Position_Compression_Offset.xyz, 1.0f);
+    float4 world;
+    world.x = dot(pos, Nodes[0][0]);
+    world.y = dot(pos, Nodes[0][1]);
+    world.z = dot(pos, Nodes[0][2]);
+    world.w = 1.0f;
+    OUT.position = mul(world, View_Projection);
+    OUT.texcoord = IN.texcoord;
+    OUT.color = IN.color;
+    return OUT;
+}
+
+float4 albedo_ps(rigid_output IN) : SV_Target0
+{
+    return IN.color;
+}

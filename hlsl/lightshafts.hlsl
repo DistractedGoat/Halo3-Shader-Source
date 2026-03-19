@@ -1,5 +1,7 @@
 #line 1 "source\rasterizer\hlsl\lightshafts.hlsl"
 
+#define NO_MV_OUTPUT 1
+
 #include "global.fx"
 #include "hlsl_vertex_types.fx"
 #include "postprocess.fx"

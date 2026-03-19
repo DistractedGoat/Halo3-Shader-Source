@@ -33,6 +33,8 @@
 
 #include "spherical_harmonics.fx"
 
+#include "motion_vectors.fx"
+
 PARAM(float, g_tree_animation_coeff);
 
 PARAM(float, animation_amplitude_horizontal);
@@ -224,6 +226,9 @@ struct static_common_vsout
 #ifdef misc_attr_define
 	float4 misc						: TEXCOORD9;
 #endif
+#ifdef ACCUM_PIXEL_HAS_MV
+	float2 motion_vector			: TEXCOORD10;
+#endif
 };
 
 static_common_vsout static_common_vs(
@@ -259,6 +264,10 @@ static_common_vsout static_common_vs(
 	
 	vsout.clip_distance = dot(vsout.position, v_clip_plane);
 
+#ifdef ACCUM_PIXEL_HAS_MV
+	vsout.motion_vector = compute_motion_vector(vsout.position, vertex.position);
+#endif
+
 	return vsout;
 }
 
@@ -284,7 +293,11 @@ accum_pixel static_common_ps(
 	out_color.w= output_alpha;
 #endif
    
-	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(out_color, true, false);	
+#ifdef ACCUM_PIXEL_HAS_MV
+	g_motion_vector_passthrough = vsout.motion_vector;
+#endif
+
+	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(out_color, true, false);
 }
 
 
@@ -419,6 +432,10 @@ static_common_vsout static_per_vertex_vs(
 	compute_scattering(Camera_Position, vertex.position, vsout.extinction, vsout.inscatter);
 
 	vsout.clip_distance = dot(vsout.position, v_clip_plane);
+
+#ifdef ACCUM_PIXEL_HAS_MV
+	vsout.motion_vector = compute_motion_vector(vsout.position, vertex.position);
+#endif
 
 	return vsout;
 }

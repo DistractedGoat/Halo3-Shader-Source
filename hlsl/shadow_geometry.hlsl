@@ -1,5 +1,7 @@
 #line 2 "source\rasterizer\hlsl\shadow_geometry.hlsl"
 
+#define NO_MV_OUTPUT 1
+
 #include "global.fx"
 #include "hlsl_constant_mapping.fx"
 #include "deform.fx"

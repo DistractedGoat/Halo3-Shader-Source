@@ -132,7 +132,7 @@ void default_vs(
 	out float4	out_texcoord			:	TEXCOORD0,
 	out float4	out_ambient_light		:	TEXCOORD1,
 	out float4	out_inscatter			:	TEXCOORD2
-#ifdef pc   
+#ifdef pc
    ,out float3	out_normal  			:	TEXCOORD3
 #endif
    )
@@ -323,12 +323,11 @@ default_ps(
 	in float4	texcoord			:	TEXCOORD0,								// z coordinate is unclamped cosine lobe for the 'sun'
 	in float4	ambient_light		:	TEXCOORD1,
 	in float4	inscatter			:	TEXCOORD2
-#ifdef pc   
+#ifdef pc
    ,in float3	normal   			:	TEXCOORD3
 #endif
    ) : SV_Target0					// w unused
 {
-
 	float4 light= ambient_light;
 #ifdef DECORATOR_SHADED_LIGHT
 	{

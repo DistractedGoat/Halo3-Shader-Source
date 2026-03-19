@@ -23,7 +23,9 @@ CBUFFER_BEGIN(ViewVS)
 	CBUFFER_CONST(ViewVS,		float,		vs_total_time,				k_vs_total_time)
 	CBUFFER_CONST(ViewVS,		float3,		vs_total_time_pad,			k_vs_total_time_pad)
 	CBUFFER_CONST(ViewVS,		bool,		v_always_true,				k_vs_always_true)
-CBUFFER_END	
+CBUFFER_END
+// NOTE: Prev_View_Projection removed from ViewVS — engine crashes on CB size change.
+// Motion vectors read prev VP from IniParams texture (t120) instead.
 	
 SHADER_CONST_ALIAS(ViewVS,		float4,		View_Projection_X,			View_Projection._m00_m10_m20_m30,	k_viewproj_xform_x,		k_viewproj_xform, 	0)
 SHADER_CONST_ALIAS(ViewVS,		float4,		View_Projection_Y,			View_Projection._m01_m11_m21_m31,	k_viewproj_xform_y,		k_viewproj_xform, 	16)
@@ -132,6 +134,9 @@ CBUFFER_END
 VERTEX_TEXTURE_AND_SAMPLER(_2D,			sampler_atmosphere_neta_table,	k_vs_sampler_atmosphere_neta_table,		0)
 #ifndef COMPUTE_SHADER
 VERTEX_TEXTURE_AND_SAMPLER(_2D,			sampler_weather_occlusion,		k_vs_sampler_weather_occlusion,			1)
+#endif
+#ifdef ENABLE_MOTION_VECTORS
+VERTEX_TEXTURE_AND_SAMPLER(_2D,			sampler_prev_vp_matrix,			k_vs_sampler_prev_vp_matrix,			2)
 #endif
 
 PIXEL_TEXTURE_AND_SAMPLER(_2D_ARRAY,	lightprobe_texture_array,		k_sampler_lightprobe_texture_array,		13)

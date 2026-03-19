@@ -1,6 +1,5 @@
 #line 2 "source\rasterizer\hlsl\shadow_generate.fx"
 
-
 #ifndef shadow_depth_map_1
 PARAM_SAMPLER_COMPARISON_2D(shadow_depth_map_1);
 #endif

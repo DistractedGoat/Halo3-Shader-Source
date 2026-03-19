@@ -1,5 +1,7 @@
 
-#define ENTRY_POINT(name) ENTRY_POINT_##name
+// Double-expansion to ensure macro arguments are expanded before ## concatenation
+#define _ENTRY_POINT_CONCAT(name) ENTRY_POINT_##name
+#define ENTRY_POINT(name) _ENTRY_POINT_CONCAT(name)
 
 #define ENTRY_POINT_default 0
 #define ENTRY_POINT_albedo 1

@@ -1,6 +1,9 @@
 #include "clip_plane.fx"
 #include "dynamic_light_clip.fx"
 
+// halo3-ng: shared motion vector computation (moved to motion_vectors.fx)
+#include "motion_vectors.fx"
+
 //#ifndef pc
 #define ALPHA_OPTIMIZATION
 //#endif
@@ -428,6 +431,9 @@ struct static_per_pixel_vsout
 #ifdef misc_attr_define
 	float4 misc						: TEXCOORD9;
 #endif
+#ifdef ACCUM_PIXEL_HAS_MV
+	float2 motion_vector				: TEXCOORD10;
+#endif
 };
 
 ///constant to do order 2 SH convolution
@@ -462,6 +468,9 @@ static_per_pixel_vsout static_per_pixel_vs(
 
 	compute_scattering(Camera_Position, vertex.position, vsout.extinction, vsout.inscatter);
 	
+#ifdef ACCUM_PIXEL_HAS_MV
+	vsout.motion_vector = compute_motion_vector(vsout.position, vertex.position);
+#endif
 	vsout.clip_distance = dot(vsout.position, v_clip_plane);
 
 	return vsout;
@@ -517,6 +526,9 @@ accum_pixel static_per_pixel_ps(
 		vsout.inscatter,
 		misc);
 
+#ifdef ACCUM_PIXEL_HAS_MV
+	g_motion_vector_passthrough = vsout.motion_vector;
+#endif
 	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(out_color, true, false);
 	
 }
@@ -535,6 +547,9 @@ struct static_sh_vsout
 	float3 inscatter				: COLOR1;
 #ifdef misc_attr_define
 	float4 misc						: TEXCOORD9;
+#endif
+#ifdef ACCUM_PIXEL_HAS_MV
+	float2 motion_vector				: TEXCOORD10;
 #endif
 };
 
@@ -571,6 +586,9 @@ static_sh_vsout static_sh_vs(
 	
 	compute_scattering(Camera_Position, vertex.position, vsout.extinction, vsout.inscatter);
 	
+#ifdef ACCUM_PIXEL_HAS_MV
+	vsout.motion_vector = compute_motion_vector(vsout.position, vertex.position);
+#endif
 	vsout.clip_distance = dot(vsout.position, v_clip_plane);
 
 	return vsout;
@@ -627,6 +645,9 @@ accum_pixel static_sh_ps(
 		misc);
 
 
+#ifdef ACCUM_PIXEL_HAS_MV
+	g_motion_vector_passthrough = vsout.motion_vector;
+#endif
 	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(out_color, true, false);	
 }
 
@@ -647,6 +668,9 @@ struct static_per_vertex_vsout
 	float4 extinction				: COLOR0;
 #ifdef misc_attr_define
 	float4 misc						: TEXCOORD9;
+#endif
+#ifdef ACCUM_PIXEL_HAS_MV
+	float2 motion_vector				: TEXCOORD10;
 #endif
 };
 
@@ -719,6 +743,9 @@ static_per_vertex_vsout static_per_vertex_vs(
 	vsout.texcoord.zw = inscatter.xy;
 	vsout.extinction.w = inscatter.z;
 
+#ifdef ACCUM_PIXEL_HAS_MV
+	vsout.motion_vector = compute_motion_vector(vsout.position, vertex.position);
+#endif
 	vsout.clip_distance = dot(vsout.position, v_clip_plane);
 
 	return vsout;
@@ -772,6 +799,9 @@ accum_pixel static_per_vertex_ps(
 		float3(vsout.texcoord.z, vsout.texcoord.w, vsout.extinction.w),
 		misc);
 		
+#ifdef ACCUM_PIXEL_HAS_MV
+	g_motion_vector_passthrough = vsout.motion_vector;
+#endif
 	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(out_color, true, false);	
 }
 
@@ -790,6 +820,9 @@ struct static_per_vertex_color_vsout
 	float3 inscatter				: COLOR1;
 #ifdef misc_attr_define
 	float4 misc						: TEXCOORD9;
+#endif
+#ifdef ACCUM_PIXEL_HAS_MV
+	float2 motion_vector				: TEXCOORD10;
 #endif
 };
 
@@ -825,6 +858,9 @@ static_per_vertex_color_vsout static_per_vertex_color_vs(
 	
 	compute_scattering(Camera_Position, vertex.position, vsout.extinction, vsout.inscatter);
 	
+#ifdef ACCUM_PIXEL_HAS_MV
+	vsout.motion_vector = compute_motion_vector(vsout.position, vertex.position);
+#endif
 	vsout.clip_distance = dot(vsout.position, v_clip_plane);
 
 	return vsout;
@@ -892,6 +928,9 @@ accum_pixel static_per_vertex_color_ps(
 	//out_color.xyz= vert_color * g_exposure.rgb;
 	out_color.w= ALPHA_CHANNEL_OUTPUT;
 		
+#ifdef ACCUM_PIXEL_HAS_MV
+	g_motion_vector_passthrough = vsout.motion_vector;
+#endif
 	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(out_color, true, false);
 	
 }
@@ -910,6 +949,9 @@ struct static_prt_vsout
 	float3 inscatter				: COLOR1;
 #ifdef misc_attr_define
 	float4 misc						: TEXCOORD9;
+#endif
+#ifdef ACCUM_PIXEL_HAS_MV
+	float2 motion_vector				: TEXCOORD10;
 #endif
 };
 
@@ -981,6 +1023,9 @@ static_prt_vsout static_prt_ambient_vs(
 	
 	compute_scattering(Camera_Position, vertex.position, vsout.extinction, vsout.inscatter);
 
+#ifdef ACCUM_PIXEL_HAS_MV
+	vsout.motion_vector = compute_motion_vector(vsout.position, vertex.position);
+#endif
 	vsout.clip_distance = dot(vsout.position, v_clip_plane);
 
 	return vsout;
@@ -1049,6 +1094,9 @@ static_prt_vsout static_prt_linear_vs(
 
 	compute_scattering(Camera_Position, vertex.position, vsout.extinction, vsout.inscatter);
 
+#ifdef ACCUM_PIXEL_HAS_MV
+	vsout.motion_vector = compute_motion_vector(vsout.position, vertex.position);
+#endif
 	vsout.clip_distance = dot(vsout.position, v_clip_plane);
 
 	return vsout;
@@ -1148,6 +1196,9 @@ static_prt_vsout static_prt_quadratic_vs(
 		
 	compute_scattering(Camera_Position, vertex.position, vsout.extinction, vsout.inscatter);
 
+#ifdef ACCUM_PIXEL_HAS_MV
+	vsout.motion_vector = compute_motion_vector(vsout.position, vertex.position);
+#endif
 	vsout.clip_distance = dot(vsout.position, v_clip_plane);
 
 	return vsout;
@@ -1199,6 +1250,9 @@ accum_pixel static_prt_ps(
 		vsout.inscatter,
 		misc);
 				
+#ifdef ACCUM_PIXEL_HAS_MV
+	g_motion_vector_passthrough = vsout.motion_vector;
+#endif
 	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(out_color, true, false);	
 }
 
@@ -1214,6 +1268,9 @@ struct dynamic_light_vsout
 	float4 fragment_position_shadow				: TEXCOORD5; // homogenous coordinates of the fragment position in projective shadow space
 #ifdef misc_attr_define
 	float4 misc									: TEXCOORD9;
+#endif
+#ifdef ACCUM_PIXEL_HAS_MV
+	float2 motion_vector				: TEXCOORD10;
 #endif
 };
 
@@ -1248,6 +1305,10 @@ dynamic_light_vsout default_dynamic_light_vs(
 	vsout.fragment_position_shadow = mul(float4(vertex.position, 1.0f), Shadow_Projection);
 	
 	vsout.clip_distance = calc_dynamic_light_clip_distance(vsout.position);
+
+#ifdef ACCUM_PIXEL_HAS_MV
+	vsout.motion_vector = compute_motion_vector(vsout.position, vertex.position);
+#endif
 
 	return vsout;
 }
@@ -1401,6 +1462,9 @@ accum_pixel default_dynamic_light_ps(
 	// set alpha channel
 	out_color.w= ALPHA_CHANNEL_OUTPUT;
 
+#ifdef ACCUM_PIXEL_HAS_MV
+	g_motion_vector_passthrough = vsout.motion_vector;
+#endif
 	return convert_to_render_target(out_color, true, true);
 }
 
@@ -1433,6 +1497,9 @@ struct lightmap_debug_mode_vsout
 #ifdef misc_attr_define
 	float4 misc						: TEXCOORD9;
 #endif
+#ifdef ACCUM_PIXEL_HAS_MV
+	float2 motion_vector				: TEXCOORD10;
+#endif
 };
 
 #ifdef xdk_2907
@@ -1455,6 +1522,9 @@ lightmap_debug_mode_vsout lightmap_debug_mode_vs(
 	vsout.tangent = vertex.tangent;
 	vsout.binormal = vertex.binormal;
 	
+#ifdef ACCUM_PIXEL_HAS_MV
+	vsout.motion_vector = compute_motion_vector(vsout.position, vertex.position);
+#endif
 	vsout.clip_distance = dot(vsout.position, v_clip_plane);
 
 	return vsout;
@@ -1490,6 +1560,9 @@ accum_pixel lightmap_debug_mode_ps(
 		linear_only,
 		quadratic);
 		
+#ifdef ACCUM_PIXEL_HAS_MV
+	g_motion_vector_passthrough = vsout.motion_vector;
+#endif
 	return convert_to_render_target(out_color, true, false);
 	
 }
