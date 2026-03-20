@@ -11,6 +11,11 @@ Copyright (c) Microsoft Corporation, 2005. all rights reserved.
 #include "simple_lights.fx"
 #include "utilities.fx"
 
+// SSR direct texture at fixed register â€” 3DMigoto binds ResourceSSRFinal here
+#if defined(pc) && (DX_VERSION == 11) && defined(PIXEL_SHADER)
+Texture2D<float4> ssr_direct : register(t19);
+#endif
+
 /* vertex shader implementation */
 #ifdef VERTEX_SHADER
 
@@ -951,7 +956,14 @@ accum_pixel water_shading(s_water_interpolators INTERPOLATORS)
 		float sun_scale= dot(sun_light_rate, sun_light_rate);		
 
 		float alpha= parts.x*sun_scale + parts.y;
-		color_reflection= environment_sample.rgb * alpha;
+color_reflection= environment_sample.rgb * alpha;
+
+		#if defined(pc) && (DX_VERSION == 11)
+		{
+			float4 ssr_val= ssr_direct.Load(int3(texcoord_ss * float2(1920.0, 1080.0), 0));
+			color_reflection= lerp(color_reflection, ssr_val.rgb, saturate(ssr_val.a));
+		}
+		#endif
 
 		color_reflection*= reflection_coefficient;
 	}
@@ -1058,7 +1070,10 @@ accum_pixel water_shading(s_water_interpolators INTERPOLATORS)
 #endif
 */
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-	return convert_to_render_target(float4(output_color, 1.0f), true, true);		
+	
+g_motion_vector_passthrough = normal.xy * 0.5 + 0.5;
+
+return convert_to_render_target(float4(output_color, 1.0f), true, true);		
 }
 
 #endif //PIXEL_SHADER

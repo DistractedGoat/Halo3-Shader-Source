@@ -1178,6 +1178,7 @@ accum_pixel static_lighting_shared_ps(
 			view_reflect_dir,
 			float4(1.0f, 1.0f, 1.0f, max(0.01f, 1.01 - specular.power / 200.0f)),		// convert specular power to roughness (cheap and bad approximation)
 			area_specular_light);
+
 	#endif
 
 	// mix all light and albedo's together

@@ -226,7 +226,7 @@ float4 calc_output_color_with_explicit_light_quadratic(
 	envmap_area_specular_only= max(envmap_area_specular_only, 0.001f);
 	float3 envmap_radiance= CALC_ENVMAP(envmap_type)(view_dir, bump_normal, view_reflect_dir, envmap_specular_reflectance_and_roughness, envmap_area_specular_only);
 
-	//compute self illumination	
+	//compute self illumination
 	float3 self_illum_radiance= calc_self_illumination_ps(texcoord, albedo.xyz, view_dir_in_tangent_space);	// * ILLUM_SCALE;
 	
 	// set color channels

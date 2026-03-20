@@ -158,7 +158,7 @@ enum
 	k_sampler_normal_texture= 17, 
 	
 	k_sampler_depth_buffer = 18,
-#else	
+#else
 	k_sampler_albedo_texture= 10, 
 	k_sampler_normal_texture= 11, 
 

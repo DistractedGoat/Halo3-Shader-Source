@@ -36,6 +36,8 @@ LOCAL_SAMPLER_2D(mv_buffer, 12);
 // Previous frame VP matrix as 4x1 texture (bound by 3DMigoto for camera MV fallback)
 LOCAL_SAMPLER_2D(prev_vp_texture, 13);
 
+// SSR removed from final_composite — now injected per-surface (water_shading.fx etc.)
+
 // --- 4x4 matrix inverse (adjugate / determinant) ---
 float4x4 inverse4x4(float4x4 m)
 {
@@ -206,6 +208,8 @@ float4 default_ps(SCREEN_POSITION_INPUT(screen_position), in float2 texcoord :TE
 
 	combined.rgb *= ao;
 	// === end AO ===
+
+	// SSR now injected per-surface (water_shading.fx), not here
 
 	float4 bloom= CALC_BLOOM(texcoord);											// sample postprocessed buffer(s)
 	float3 blend= CALC_BLEND(texcoord, combined, bloom);						// blend them together
