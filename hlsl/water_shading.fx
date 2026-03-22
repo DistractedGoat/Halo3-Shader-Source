@@ -11,9 +11,11 @@ Copyright (c) Microsoft Corporation, 2005. all rights reserved.
 #include "simple_lights.fx"
 #include "utilities.fx"
 
-// SSR direct texture at fixed register â€” 3DMigoto binds ResourceSSRFinal here
+// SSR direct texture at fixed register — 3DMigoto binds ResourceSSRFinal here
+// prev_vp_direct: previous frame VP matrix (4x1 texture, rows at pixels 0-3) for display-time reprojection
 #if defined(pc) && (DX_VERSION == 11) && defined(PIXEL_SHADER)
 Texture2D<float4> ssr_direct : register(t19);
+Texture2D<float4> prev_vp_direct : register(t20);
 #endif
 
 /* vertex shader implementation */
@@ -21,7 +23,7 @@ Texture2D<float4> ssr_direct : register(t19);
 
 #if DX_VERSION == 9
 #define CATEGORY_PARAM(_name) PARAM(int, _name)
-#elif DX_VERSION == 11
+#elif DX_VERSION == 1
 #define CATEGORY_PARAM(_name) PARAM(float, _name)
 #endif
 
@@ -960,8 +962,32 @@ color_reflection= environment_sample.rgb * alpha;
 
 		#if defined(pc) && (DX_VERSION == 11)
 		{
-			float4 ssr_val= ssr_direct.Load(int3(texcoord_ss * float2(1920.0, 1080.0), 0));
-			float3 ssr_pre_exposure= ssr_val.rgb / max(g_exposure.r, 1e-4);
+			// Display-time MV reprojection: sample SSR where this water point
+			// was on screen last frame (fixes 1-frame compute delay lag)
+			float2 ssr_uv = texcoord_ss;
+
+			float4 prevVP_r0 = prev_vp_direct.Load(int3(0, 0, 0));
+			if (prevVP_r0.x != 0.0 || prevVP_r0.y != 0.0 || prevVP_r0.z != 0.0 || prevVP_r0.w != 0.0)
+			{
+				float4x4 prevVP = float4x4(
+					prevVP_r0,
+					prev_vp_direct.Load(int3(1, 0, 0)),
+					prev_vp_direct.Load(int3(2, 0, 0)),
+					prev_vp_direct.Load(int3(3, 0, 0))
+				);
+
+				float4 prevClip = mul(float4(INTERPOLATORS.position_ws.xyz, 1.0), prevVP);
+				if (abs(prevClip.w) > 1e-6)
+				{
+					float2 prevNDC = prevClip.xy / prevClip.w;
+					float2 prevUV = prevNDC * float2(0.5f, -0.5f) + 0.5f;
+					prevUV = k_water_player_view_constant.xy + prevUV * k_water_player_view_constant.zw;
+					ssr_uv = prevUV;
+				}
+			}
+
+			float4 ssr_val= ssr_direct.Load(int3(ssr_uv * float2(1920.0f, 1080.0f), 0));
+			float3 ssr_pre_exposure= (ssr_val.rgb / max(g_exposure.r, 1e-4f)) * 0.8f;
 			color_reflection= lerp(color_reflection, ssr_pre_exposure, saturate(ssr_val.a));
 		}
 		#endif
@@ -976,6 +1002,7 @@ color_reflection= environment_sample.rgb * alpha;
 
 	// only apply lightmap_intensity on diffuse and reflection, watercolor of refrection has already considered
 	color_diffuse*= lightmap_intensity;	
+	color_diffuse*= color_diffuse * 0.66f;	
 	foam_color.rgb*= lightmap_intensity;
 
 	// add dynamic lighting
@@ -1001,7 +1028,7 @@ color_reflection= environment_sample.rgb * alpha;
 #if defined(pc) && (DX_VERSION == 9)
 	float3 fresnel_normal = /*k_is_camera_underwater ? -normal :*/ normal;
 #else
-	float3 fresnel_normal= normal * 2 * (0.5f - k_is_camera_underwater);
+	float3 fresnel_normal= normal * 2.0f * (0.5f - k_is_camera_underwater);
 #endif
 	float fresnel= compute_fresnel(INTERPOLATORS.incident_ws.xyz, fresnel_normal, fresnel_coefficient);
 	//fresnel= saturate(fresnel*ripple_slope_length);		// apply interaction disturbance

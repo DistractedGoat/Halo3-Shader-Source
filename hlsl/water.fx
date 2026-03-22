@@ -1,7 +1,7 @@
 /*
 WATER.FX
 Copyright (c) Microsoft Corporation, 2005. all rights reserved.
-04/12/2006 13:36 davcook	
+04/12/2006 13:36 davcook
 */
 
 #include "global.fx"
