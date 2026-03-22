@@ -933,7 +933,8 @@ accum_pixel water_shading(s_water_interpolators INTERPOLATORS)
 	float3 sun_dir_ws= float3(0.0, 0.0, 1.0);	//	sun direction
 	//sun_dir_ws= normalize(sun_dir_ws);
 	float n_dot_l= saturate(dot(sun_dir_ws, normal));	
-	float3 color_diffuse= water_kd * n_dot_l;	
+	// DIFFUSE COLOR
+	float3 color_diffuse= water_kd * n_dot_l * 0.0f;
 
 	// compute reflection
 	float3 color_reflection= 0; //float3(0.1, 0.1, 0.1) * reflection_coefficient;
@@ -967,7 +968,7 @@ color_reflection= environment_sample.rgb * alpha;
 			float2 ssr_uv = texcoord_ss;
 
 			float4 prevVP_r0 = prev_vp_direct.Load(int3(0, 0, 0));
-			if (prevVP_r0.x != 0.0 || prevVP_r0.y != 0.0 || prevVP_r0.z != 0.0 || prevVP_r0.w != 0.0)
+			if (prevVP_r0.x != 0.0f || prevVP_r0.y != 0.0f || prevVP_r0.z != 0.0f || prevVP_r0.w != 0.0f)
 			{
 				float4x4 prevVP = float4x4(
 					prevVP_r0,
@@ -976,8 +977,8 @@ color_reflection= environment_sample.rgb * alpha;
 					prev_vp_direct.Load(int3(3, 0, 0))
 				);
 
-				float4 prevClip = mul(float4(INTERPOLATORS.position_ws.xyz, 1.0), prevVP);
-				if (abs(prevClip.w) > 1e-6)
+				float4 prevClip = mul(float4(INTERPOLATORS.position_ws.xyz, 1.0f), prevVP);
+				if (abs(prevClip.w) > 1e-6f)
 				{
 					float2 prevNDC = prevClip.xy / prevClip.w;
 					float2 prevUV = prevNDC * float2(0.5f, -0.5f) + 0.5f;
@@ -987,7 +988,8 @@ color_reflection= environment_sample.rgb * alpha;
 			}
 
 			float4 ssr_val= ssr_direct.Load(int3(ssr_uv * float2(1920.0f, 1080.0f), 0));
-			float3 ssr_pre_exposure= (ssr_val.rgb / max(g_exposure.r, 1e-4f)) * 0.8f;
+			//SSR controls
+			float3 ssr_pre_exposure= pow(ssr_val.rgb / max(g_exposure.r, 1e-4f), 1.2f) * 0.7f;
 			color_reflection= lerp(color_reflection, ssr_pre_exposure, saturate(ssr_val.a));
 		}
 		#endif
