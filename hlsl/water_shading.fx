@@ -961,7 +961,8 @@ color_reflection= environment_sample.rgb * alpha;
 		#if defined(pc) && (DX_VERSION == 11)
 		{
 			float4 ssr_val= ssr_direct.Load(int3(texcoord_ss * float2(1920.0, 1080.0), 0));
-			color_reflection= lerp(color_reflection, ssr_val.rgb, saturate(ssr_val.a));
+			float3 ssr_pre_exposure= ssr_val.rgb / max(g_exposure.r, 1e-4);
+			color_reflection= lerp(color_reflection, ssr_pre_exposure, saturate(ssr_val.a));
 		}
 		#endif
 
