@@ -23,7 +23,7 @@ Texture2D<float4> prev_vp_direct : register(t20);
 
 #if DX_VERSION == 9
 #define CATEGORY_PARAM(_name) PARAM(int, _name)
-#elif DX_VERSION == 1
+#elif DX_VERSION == 11
 #define CATEGORY_PARAM(_name) PARAM(float, _name)
 #endif
 
@@ -673,7 +673,7 @@ accum_pixel water_shading(s_water_interpolators INTERPOLATORS)
 
 	float depth_water_fake = 0;// INTERPOLATORS.position_ss.z can be used for more transparent underwater, but it looks more different from legacy
 	//	get current pixel depth
-	float depth_water = k_is_camera_underwater ? depth_water_fake : depth_buffer.Load(int3(calc_viewport_pixel_coords_from_uv(texcoord_ss), 0)).r;
+	precise float depth_water = k_is_camera_underwater ? depth_water_fake : depth_buffer.Load(int3(calc_viewport_pixel_coords_from_uv(texcoord_ss), 0)).r;
 
 	if (depth_water > INTERPOLATORS.position.z)
 	{
@@ -934,7 +934,7 @@ accum_pixel water_shading(s_water_interpolators INTERPOLATORS)
 	//sun_dir_ws= normalize(sun_dir_ws);
 	float n_dot_l= saturate(dot(sun_dir_ws, normal));	
 	// DIFFUSE COLOR
-	float3 color_diffuse= water_kd * n_dot_l * 0.0f;
+	float3 color_diffuse= water_kd * n_dot_l * 0.01f;
 
 	// compute reflection
 	float3 color_reflection= 0; //float3(0.1, 0.1, 0.1) * reflection_coefficient;
@@ -962,6 +962,7 @@ accum_pixel water_shading(s_water_interpolators INTERPOLATORS)
 color_reflection= environment_sample.rgb * alpha;
 
 		#if defined(pc) && (DX_VERSION == 11)
+		[branch] if (true)
 		{
 			// Display-time MV reprojection: sample SSR where this water point
 			// was on screen last frame (fixes 1-frame compute delay lag)
@@ -990,6 +991,7 @@ color_reflection= environment_sample.rgb * alpha;
 			float4 ssr_val= ssr_direct.Load(int3(ssr_uv * float2(1920.0f, 1080.0f), 0));
 			//SSR controls
 			float3 ssr_pre_exposure= pow(ssr_val.rgb / max(g_exposure.r, 1e-4f), 1.2f) * 0.7f;
+			// float3 ssr_pre_exposure= ssr_val.rgb / max(g_exposure.r, 1e-4f);
 			color_reflection= lerp(color_reflection, ssr_pre_exposure, saturate(ssr_val.a));
 		}
 		#endif
@@ -998,13 +1000,13 @@ color_reflection= environment_sample.rgb * alpha;
 	}
 	else if (TEST_CATEGORY_OPTION(reflection, dynamic))
 	{
-		color_reflection= sample2D(scene_ldr_texture, float2(texcoord_ss.x, texcoord_ss.y-0.2f));		
+		color_reflection= sample2D(scene_ldr_texture, float2(texcoord_ss.x, texcoord_ss.y-0.2f));
 		color_reflection*= reflection_coefficient;
 	}
 
 	// only apply lightmap_intensity on diffuse and reflection, watercolor of refrection has already considered
 	color_diffuse*= lightmap_intensity;	
-	color_diffuse*= color_diffuse * 0.66f;	
+	// color_diffuse*= color_diffuse * 0.66f;	
 	foam_color.rgb*= lightmap_intensity;
 
 	// add dynamic lighting
@@ -1021,9 +1023,9 @@ color_reflection= environment_sample.rgb * alpha;
 			20,
 			simple_light_diffuse_light,
 			simple_light_specular_light);
-
+		
 		color_diffuse+= simple_light_diffuse_light * water_kd;
-		color_reflection+= simple_light_specular_light;
+		color_reflection+= simple_light_specular_light * 0.6f;
 	}
 
 	// computer fresnel and output color	

@@ -11,7 +11,7 @@
 #include "shadow_apply_registers.fx"
 
 #ifndef SAMPLE_PERCENTAGE_CLOSER
-#define SAMPLE_PERCENTAGE_CLOSER sample_percentage_closer_PCF_3x3_block
+#define SAMPLE_PERCENTAGE_CLOSER sample_percentage_closer_PCF_5x5_block
 #endif // SAMPLE_PERCENTAGE_CLOSER
 
 LOCAL_SAMPLER_2D_IN_VIEWPORT_ALLWAYS(zbuffer, 0);
@@ -112,6 +112,25 @@ float sample_percentage_closer_PCF_3x3_block(float3 fragment_shadow_position, fl
 	return color * scale;
 }
 
+// halo3-ng: 5x5 PCF for softer shadow edges (12-tap cross pattern)
+float sample_percentage_closer_PCF_5x5_block(float3 fragment_shadow_position, float depth_bias)
+{
+	float2 texel= fragment_shadow_position.xy;
+
+	float4 max_depth= depth_bias;
+	max_depth *= float4(-1.0f, -sqrt(20.0f), -3.0f, -sqrt(32.0f));
+	max_depth += fragment_shadow_position.z;
+
+	// 12-tap cross: skip the 4 extreme corners of 5x5
+	float color=
+					                                                                                           step(max_depth.z, tex2D_offset_point(shadow, texel, +0.0f, -2.0f).r) +
+					step(max_depth.z, tex2D_offset_point(shadow, texel, -1.0f, -1.0f).r) + step(max_depth.y, tex2D_offset_point(shadow, texel, +0.0f, -1.0f).r) + step(max_depth.z, tex2D_offset_point(shadow, texel, +1.0f, -1.0f).r) +
+		step(max_depth.z, tex2D_offset_point(shadow, texel, -2.0f, +0.0f).r) + step(max_depth.y, tex2D_offset_point(shadow, texel, -1.0f, +0.0f).r) + step(max_depth.x, tex2D_offset_point(shadow, texel, +0.0f, +0.0f).r) + step(max_depth.y, tex2D_offset_point(shadow, texel, +1.0f, +0.0f).r) + step(max_depth.z, tex2D_offset_point(shadow, texel, +2.0f, +0.0f).r) +
+					step(max_depth.z, tex2D_offset_point(shadow, texel, -1.0f, +1.0f).r) + step(max_depth.y, tex2D_offset_point(shadow, texel, +0.0f, +1.0f).r) + step(max_depth.z, tex2D_offset_point(shadow, texel, +1.0f, +1.0f).r) +
+					                                                                                           step(max_depth.z, tex2D_offset_point(shadow, texel, +0.0f, +2.0f).r);
+
+	return color / 13.0f;
+}
 
 
 accum_pixel default_ps(
@@ -205,9 +224,9 @@ accum_pixel default_ps(
 		
 		// compute darkening
 		darken= saturate(1.01-shadow_darkness + percentage_closer * shadow_darkness);		// 1.001 to fix round off error..  (we want to ensure we output at least 1.0 when percentage_closer= 1, not 0.9999)
-		darken*= darken;
+		// halo3-ng: removed darken *= darken (squaring crushed soft shadow penumbra gradients)
 	}
-	
+
 	//return convert_to_render_target(float4(shadow_darkness, 0.0, 0.0, 0.0), false, true);
 
 	// compute inscatter
@@ -331,8 +350,8 @@ accum_pixel albedo_ps(
 	{		
 		// compute darkening
 		darken= saturate(1.01-shadow_darkness + percentage_closer * shadow_darkness);		// 1.001 to fix round off error..  (we want to ensure we output at least 1.0 when percentage_closer= 1, not 0.9999)
-		darken*= darken;
-	}	
+		// halo3-ng: removed darken *= darken (squaring crushed soft shadow penumbra gradients)
+	}
 
 	// compute inscatter
 #if defined(pc) && (DX_VERSION == 9)

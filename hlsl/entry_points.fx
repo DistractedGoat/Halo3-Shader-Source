@@ -286,7 +286,9 @@ float4 calc_output_color_with_explicit_light_linear_with_dominant_light(
 	float3 light_intensity,
 	float3 extinction,
 	float3 inscatter,
-	float4 misc)
+	float4 misc,
+	float3 l2_sh_quadratic[5],			// halo3-ng: L2 quadratic coefficients [4..8] (zero if L1-only)
+	bool l2_active)						// halo3-ng: true if L2 sentinel detected
 {
 
 	float3 view_dir= normalize(fragment_to_camera_world);
@@ -349,19 +351,59 @@ float4 calc_output_color_with_explicit_light_linear_with_dominant_light(
 	float3 envmap_area_specular_only;
 	float4 specular_radiance;
 	float3 diffuse_radiance= ravi_order_2_with_dominant_light(bump_normal, sh_lighting_coefficients, light_direction, light_intensity);
-	
+
+	// halo3-ng: L2 additive quadratic correction
 	float4 zero_vec= 0.0f;
-	float4 lightint_coefficients[10]= {
-		sh_lighting_coefficients[0],
-		sh_lighting_coefficients[1],
-		sh_lighting_coefficients[2],
-		sh_lighting_coefficients[3],
-		zero_vec,
-		zero_vec,
-		zero_vec,
-		zero_vec,
-		zero_vec,
-		zero_vec};
+	float4 lightint_coefficients[10];
+	lightint_coefficients[0] = sh_lighting_coefficients[0];
+	lightint_coefficients[1] = sh_lighting_coefficients[1];
+	lightint_coefficients[2] = sh_lighting_coefficients[2];
+	lightint_coefficients[3] = sh_lighting_coefficients[3];
+
+	if (l2_active)
+	{
+		// Quadratic SH evaluation (matches ravi_order_3 L2 terms)
+		// pack_constants_texture_array mapping applied inline:
+		//   lc[4] = (-c4, c5, c7, 0) per channel
+		//   lc[7] = (-c8, c8, -sqrt3*c6, sqrt3*c6) per channel
+		float c1 = 0.429043f;
+		float3 a = bump_normal.xyz * bump_normal.yzx;
+		float3 x2;
+		x2.r = dot(a, float3(-l2_sh_quadratic[0].r, l2_sh_quadratic[1].r, l2_sh_quadratic[3].r));
+		x2.g = dot(a, float3(-l2_sh_quadratic[0].g, l2_sh_quadratic[1].g, l2_sh_quadratic[3].g));
+		x2.b = dot(a, float3(-l2_sh_quadratic[0].b, l2_sh_quadratic[1].b, l2_sh_quadratic[3].b));
+
+		float4 b = float4(bump_normal.xyz * bump_normal.xyz, 1.0f / 3.0f);
+		float3 x3;
+		x3.r = dot(b, float4(-l2_sh_quadratic[4].r, l2_sh_quadratic[4].r,
+		                      -1.73205080756f * l2_sh_quadratic[2].r, 1.73205080756f * l2_sh_quadratic[2].r));
+		x3.g = dot(b, float4(-l2_sh_quadratic[4].g, l2_sh_quadratic[4].g,
+		                      -1.73205080756f * l2_sh_quadratic[2].g, 1.73205080756f * l2_sh_quadratic[2].g));
+		x3.b = dot(b, float4(-l2_sh_quadratic[4].b, l2_sh_quadratic[4].b,
+		                      -1.73205080756f * l2_sh_quadratic[2].b, 1.73205080756f * l2_sh_quadratic[2].b));
+
+		diffuse_radiance += ((-2.0f * c1) * x2 - c1 * x3) / 3.1415926535f;
+
+		// Populate L2 specular coefficients
+		lightint_coefficients[4] = float4(-l2_sh_quadratic[0].r, l2_sh_quadratic[1].r, l2_sh_quadratic[3].r, 0);
+		lightint_coefficients[5] = float4(-l2_sh_quadratic[0].g, l2_sh_quadratic[1].g, l2_sh_quadratic[3].g, 0);
+		lightint_coefficients[6] = float4(-l2_sh_quadratic[0].b, l2_sh_quadratic[1].b, l2_sh_quadratic[3].b, 0);
+		lightint_coefficients[7] = float4(-l2_sh_quadratic[4].r, l2_sh_quadratic[4].r,
+		    -1.73205080756f * l2_sh_quadratic[2].r, 1.73205080756f * l2_sh_quadratic[2].r);
+		lightint_coefficients[8] = float4(-l2_sh_quadratic[4].g, l2_sh_quadratic[4].g,
+		    -1.73205080756f * l2_sh_quadratic[2].g, 1.73205080756f * l2_sh_quadratic[2].g);
+		lightint_coefficients[9] = float4(-l2_sh_quadratic[4].b, l2_sh_quadratic[4].b,
+		    -1.73205080756f * l2_sh_quadratic[2].b, 1.73205080756f * l2_sh_quadratic[2].b);
+	}
+	else
+	{
+		lightint_coefficients[4] = zero_vec;
+		lightint_coefficients[5] = zero_vec;
+		lightint_coefficients[6] = zero_vec;
+		lightint_coefficients[7] = zero_vec;
+		lightint_coefficients[8] = zero_vec;
+		lightint_coefficients[9] = zero_vec;
+	}
 
 	CALC_MATERIAL(material_type)(
 		view_dir,						// normalized
@@ -496,34 +538,47 @@ accum_pixel static_per_pixel_ps(
 	// setup tangent frame
 	float3x3 tangent_frame = {vsout.tangent, vsout.binormal, vsout.normal};
 
-	float3 sh_coefficients[4];
-
+	// halo3-ng: dual-path L1/L2 lightmap sampling
+	float3 sh_coefficients[9];
 	float3 dominant_light_direction;
 	float3 dominant_light_intensity;
+	bool l2_available;
 
 	sample_lightprobe_texture(
 		vsout.lightmap_texcoord.xy,
 		sh_coefficients,
 		dominant_light_direction,
-		dominant_light_intensity);
+		dominant_light_intensity,
+		l2_available);
 
 	float4 prt_ravi_diff= float4(1.0f, 1.0f, 1.0f, dot(tangent_frame[2], dominant_light_direction));
 
-	float4 sh_lighting_coefficients[4];	
-	pack_constants_texture_array_linear(sh_coefficients, sh_lighting_coefficients);
+	float4 out_color;
+	{
+		// L1 linear path with dominant light re-add (ravi_order_2)
+		float3 sh_linear[4] = { sh_coefficients[0], sh_coefficients[1], sh_coefficients[2], sh_coefficients[3] };
+		float4 sh_lighting_coefficients[4];
+		pack_constants_texture_array_linear(sh_linear, sh_lighting_coefficients);
 
-	float4 out_color= calc_output_color_with_explicit_light_linear_with_dominant_light(
-		vsout.position.xy,
-		tangent_frame,
-		sh_lighting_coefficients,
-		vsout.fragment_to_camera_world,
-		vsout.texcoord,
-		prt_ravi_diff,
-		dominant_light_direction,
-		dominant_light_intensity,
-		vsout.extinction,
-		vsout.inscatter,
-		misc);
+		// halo3-ng: pass L2 quadratic coefficients to calc function
+		float3 l2_quad[5] = { sh_coefficients[4], sh_coefficients[5], sh_coefficients[6],
+		                       sh_coefficients[7], sh_coefficients[8] };
+		out_color= calc_output_color_with_explicit_light_linear_with_dominant_light(
+			vsout.position.xy,
+			tangent_frame,
+			sh_lighting_coefficients,
+			vsout.fragment_to_camera_world,
+			vsout.texcoord,
+			prt_ravi_diff,
+			dominant_light_direction,
+			dominant_light_intensity,
+			vsout.extinction,
+			vsout.inscatter,
+			misc,
+			l2_quad,
+			l2_available);
+
+	}
 
 #ifdef ACCUM_PIXEL_HAS_MV
 	g_motion_vector_passthrough = vsout.motion_vector;
@@ -785,6 +840,9 @@ accum_pixel static_per_vertex_ps(
 
 	float4 prt_ravi_diff= float4(1.0f, 1.0f, 1.0f, dot(tangent_frame[2], dominant_light_direction));
 
+	// halo3-ng: per-vertex path has no L2 lightmap data
+	float3 l2_quad_zero[5] = { float3(0,0,0), float3(0,0,0), float3(0,0,0),
+	                            float3(0,0,0), float3(0,0,0) };
 	float4 out_color= calc_output_color_with_explicit_light_linear_with_dominant_light(
 		vsout.position,
 		tangent_frame,
@@ -796,7 +854,9 @@ accum_pixel static_per_vertex_ps(
 		vsout.dominant_light_intensity,
 		vsout.extinction.xyz,
 		float3(vsout.texcoord.z, vsout.texcoord.w, vsout.extinction.w),
-		misc);
+		misc,
+		l2_quad_zero,
+		false);
 		
 #ifdef ACCUM_PIXEL_HAS_MV
 	g_motion_vector_passthrough = vsout.motion_vector;

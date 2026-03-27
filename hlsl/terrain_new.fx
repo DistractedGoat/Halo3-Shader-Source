@@ -415,22 +415,41 @@ struct entry_point_data
 };
 #define BUILD_ENTRY_POINT_DATA(data)	{ data.lightmap_texcoord= lightmap_texcoord; }
 
+// halo3-ng: dual-path L1/L2 lightmap sampling
+// get_sh_coefficients → L1 linear path (used by static_lighting_shared_ps_linear_with_dominant_light)
+// get_sh_coefficients_order3 → L2 quadratic path (used by static_lighting_shared_ps_quadratic)
+// Routing between them happens in static_per_pixel_ps() based on t21 probe
 void get_sh_coefficients(
 	inout entry_point_data data,
 	out float4 sh_lighting_coefficients[4],
 	out float3 dominant_light_direction,
-	out float3 dominant_light_intensity)
+	out float3 dominant_light_intensity,
+	out float3 l2_sh_quadratic[5],
+	out bool l2_available)
 {
+	float3 sh_coefficients_full[9];
 
-	float3 sh_coefficients[4];
-	
 	sample_lightprobe_texture(
 		data.lightmap_texcoord,
-		sh_coefficients,
+		sh_coefficients_full,
 		dominant_light_direction,
-		dominant_light_intensity);		
+		dominant_light_intensity,
+		l2_available);
 
-	pack_constants_texture_array_linear(sh_coefficients, sh_lighting_coefficients);	
+	// Extract L1 subset for the linear-with-dominant-light path
+	float3 sh_coefficients_linear[4];
+	sh_coefficients_linear[0] = sh_coefficients_full[0];
+	sh_coefficients_linear[1] = sh_coefficients_full[1];
+	sh_coefficients_linear[2] = sh_coefficients_full[2];
+	sh_coefficients_linear[3] = sh_coefficients_full[3];
+	pack_constants_texture_array_linear(sh_coefficients_linear, sh_lighting_coefficients);
+
+	// halo3-ng: pass through L2 quadratic coefficients
+	l2_sh_quadratic[0] = sh_coefficients_full[4];
+	l2_sh_quadratic[1] = sh_coefficients_full[5];
+	l2_sh_quadratic[2] = sh_coefficients_full[6];
+	l2_sh_quadratic[3] = sh_coefficients_full[7];
+	l2_sh_quadratic[4] = sh_coefficients_full[8];
 }
 
 void get_sh_coefficients_order3(
@@ -439,6 +458,17 @@ void get_sh_coefficients_order3(
 	out float3 dominant_light_direction,
 	out float3 dominant_light_intensity)
 {
+	float3 sh_coefficients[9];
+	bool l2_available; // unused — routing handled by caller
+
+	sample_lightprobe_texture(
+		data.lightmap_texcoord,
+		sh_coefficients,
+		dominant_light_direction,
+		dominant_light_intensity,
+		l2_available);
+
+	pack_constants_texture_array(sh_coefficients, sh_lighting_coefficients);
 }
 
 #elif ((ENTRY_POINT(entry_point) == ENTRY_POINT_static_sh) || (ENTRY_POINT(entry_point) == ENTRY_POINT_static_prt_quadratic) || (ENTRY_POINT(entry_point) == ENTRY_POINT_static_prt_linear) || (ENTRY_POINT(entry_point) == ENTRY_POINT_static_prt_ambient))
@@ -472,8 +502,12 @@ void get_sh_coefficients(
 	inout entry_point_data data,
 	out float4 sh_lighting_coefficients[4],
 	out float3 dominant_light_direction,
-	out float3 dominant_light_intensity)
+	out float3 dominant_light_intensity,
+	out float3 l2_sh_quadratic[5],
+	out bool l2_available)
 {
+	l2_available = false;
+	l2_sh_quadratic[0] = l2_sh_quadratic[1] = l2_sh_quadratic[2] = l2_sh_quadratic[3] = l2_sh_quadratic[4] = float3(0,0,0);
 }
 
 #elif ENTRY_POINT(entry_point) == ENTRY_POINT_static_per_vertex
@@ -491,7 +525,9 @@ void get_sh_coefficients(
 	inout entry_point_data data,
 	out float4 sh_lighting_coefficients[4],
 	out float3 dominant_light_direction,
-	out float3 dominant_light_intensity)
+	out float3 dominant_light_intensity,
+	out float3 l2_sh_quadratic[5],
+	out bool l2_available)
 {
 	dominant_light_direction= data.p0_3_r.wyz * 0.212656f + data.p0_3_g.wyz * 0.715158f + data.p0_3_b.wyz * 0.0721856f;
 	dominant_light_direction= dominant_light_direction * float3(-1.0f, -1.0f, 1.0f);
@@ -499,6 +535,8 @@ void get_sh_coefficients(
 	float4 L0_3[3]= {data.p0_3_r, data.p0_3_g, data.p0_3_b};
 	pack_constants_linear(L0_3, sh_lighting_coefficients);
 	dominant_light_intensity= data.dominant_light_intensity;
+	l2_available = false;
+	l2_sh_quadratic[0] = l2_sh_quadratic[1] = l2_sh_quadratic[2] = l2_sh_quadratic[3] = l2_sh_quadratic[4] = float3(0,0,0);
 }
 
 void get_sh_coefficients_order3(
@@ -520,7 +558,9 @@ void get_sh_coefficients(
 	inout entry_point_data data,
 	out float4 sh_lighting_coefficients[4],
 	out float3 dominant_light_direction,
-	out float3 dominant_light_intensity)
+	out float3 dominant_light_intensity,
+	out float3 l2_sh_quadratic[5],
+	out bool l2_available)
 {
 	sh_lighting_coefficients[0]= float4(1.0f, 0.0f, 1.0f, 0.0f);
 	sh_lighting_coefficients[1]= float4(0.0f, 0.0f, 0.0f, 0.0f);
@@ -528,6 +568,8 @@ void get_sh_coefficients(
 	sh_lighting_coefficients[3]= float4(0.0f, 0.0f, 0.0f, 0.0f);
 	dominant_light_direction= 0.0f;
 	dominant_light_intensity= 0.0f;
+	l2_available = false;
+	l2_sh_quadratic[0] = l2_sh_quadratic[1] = l2_sh_quadratic[2] = l2_sh_quadratic[3] = l2_sh_quadratic[4] = float3(0,0,0);
 }
 
 void get_sh_coefficients_order3(
@@ -919,8 +961,11 @@ accum_pixel static_lighting_shared_ps_linear_with_dominant_light(
 	float4 sh_lighting_coefficients[4];
 	float3 dominant_light_direction;
 	float3 dominant_light_intensity;
-	
-	get_sh_coefficients(data, sh_lighting_coefficients, dominant_light_direction, dominant_light_intensity);
+	float3 l2_sh_quadratic[5];
+	bool l2_active;
+
+	get_sh_coefficients(data, sh_lighting_coefficients, dominant_light_direction, dominant_light_intensity,
+	                    l2_sh_quadratic, l2_active);
 
 	// get blend values
 	float4 blend= sample_blend_normalized_for_lighting(original_texcoord);
@@ -971,6 +1016,28 @@ accum_pixel static_lighting_shared_ps_linear_with_dominant_light(
 	
 	float3 diffuse_light= 0.0f;
 	diffuse_light= ravi_order_2_with_dominant_light(bump_normal, sh_lighting_coefficients, dominant_light_direction, dominant_light_intensity);
+
+	// halo3-ng: L2 additive quadratic correction (same math as entry_points.fx)
+	if (l2_active)
+	{
+		float c1 = 0.429043f;
+		float3 a = bump_normal.xyz * bump_normal.yzx;
+		float3 x2;
+		x2.r = dot(a, float3(-l2_sh_quadratic[0].r, l2_sh_quadratic[1].r, l2_sh_quadratic[3].r));
+		x2.g = dot(a, float3(-l2_sh_quadratic[0].g, l2_sh_quadratic[1].g, l2_sh_quadratic[3].g));
+		x2.b = dot(a, float3(-l2_sh_quadratic[0].b, l2_sh_quadratic[1].b, l2_sh_quadratic[3].b));
+
+		float4 b = float4(bump_normal.xyz * bump_normal.xyz, 1.0f / 3.0f);
+		float3 x3;
+		x3.r = dot(b, float4(-l2_sh_quadratic[4].r, l2_sh_quadratic[4].r,
+		                      -1.73205080756f * l2_sh_quadratic[2].r, 1.73205080756f * l2_sh_quadratic[2].r));
+		x3.g = dot(b, float4(-l2_sh_quadratic[4].g, l2_sh_quadratic[4].g,
+		                      -1.73205080756f * l2_sh_quadratic[2].g, 1.73205080756f * l2_sh_quadratic[2].g));
+		x3.b = dot(b, float4(-l2_sh_quadratic[4].b, l2_sh_quadratic[4].b,
+		                      -1.73205080756f * l2_sh_quadratic[2].b, 1.73205080756f * l2_sh_quadratic[2].b));
+
+		diffuse_light += ((-2.0f * c1) * x2 - c1 * x3) / 3.1415926535f;
+	}
 
 	// if any material is specular, evaluate the combined specular lobe
 	float3 analytical_specular_light= 0.0f;
@@ -1055,17 +1122,12 @@ accum_pixel static_per_pixel_ps(
 	entry_point_data data;
 	BUILD_ENTRY_POINT_DATA(data);
 
+	// halo3-ng: L2 data sampled and applied internally by the shared function
 	return static_lighting_shared_ps_linear_with_dominant_light(
-		data,
-		fragment_position,
-		original_texcoord,
-		normal,
-		binormal,
-		tangent,
-		fragment_to_camera_world,
-		extinction,
-		inscatter);
-		
+		data, fragment_position, original_texcoord,
+		normal, binormal, tangent,
+		fragment_to_camera_world, extinction, inscatter);
+
 }
 #endif // ENTRY_POINT_static_per_pixel
 #endif //PIXEL_SHADER

@@ -91,21 +91,41 @@ void calc_simple_lights_analytical(
 		
 		// calculate diffuse cosine lobe (diffuse surface N dot L)
 		float cosine_lobe= dot(surface_normal, fragment_to_light);
-		
-		diffusely_reflected_light  += light_radiance * max(0.05f, cosine_lobe);			// add light with cosine lobe (add ambient 5% light)
-//		diffusely_reflected_light  += light_radiance * saturate(cosine_lobe);			// add light with cosine lobe (clamped positive)
-		
-		// step(0.0f, cosine_lobe)
-		specularly_reflected_light += light_radiance * safe_pow(max(0.0f, dot(fragment_to_light, view_reflect_dir_world)), specular_power);
-//		specularly_reflected_light += light_radiance * pow(saturate(dot(fragment_to_light, view_reflect_dir_world)), specular_power);
-// #ifdef pc
-// 		if (light_index >= 7)		// god damn PC compiler likes to unroll these loops - only support 8 lights or so (:P)
-// 		{
-// 			light_index= 100;
-// 		}
-// #endif // pc
+
+		diffusely_reflected_light  += light_radiance * saturate(cosine_lobe);			// halo3-ng: removed 5% ambient floor (was: max(0.05f, cosine_lobe))
+
+		// halo3-ng: GGX specular replacing Blinn-Phong (consistent with cook_torrance.fx BRDF)
+		if (cosine_lobe > 0)
+		{
+			float3 view_dir= 2.0f * dot(surface_normal, view_reflect_dir_world) * surface_normal - view_reflect_dir_world;
+			float n_dot_v= max(dot(surface_normal, view_dir), 0.001f);
+			float n_dot_l= cosine_lobe;
+			float3 half_vector= normalize(view_dir + fragment_to_light);
+			float n_dot_h= max(dot(surface_normal, half_vector), 0.0f);
+			float v_dot_h= max(dot(view_dir, half_vector), 0.0f);
+
+			// Convert specular_power to GGX roughness
+			float t_roughness= max(sqrt(2.0f / (specular_power + 2.0f)), 0.05f);
+			float ggx_alpha= t_roughness * t_roughness;
+			float ggx_alpha2= ggx_alpha * ggx_alpha;
+
+			// GGX Distribution (Trowbridge-Reitz NDF)
+			float ggx_denom= n_dot_h * n_dot_h * (ggx_alpha2 - 1.0f) + 1.0f;
+			float distribution= ggx_alpha2 / (3.14159265f * ggx_denom * ggx_denom + 0.00001f);
+
+			// Smith-GGX Geometry Term
+			float ggx_gv= 2.0f * n_dot_v / (n_dot_v + sqrt(ggx_alpha2 + (1.0f - ggx_alpha2) * n_dot_v * n_dot_v) + 0.00001f);
+			float ggx_gl= 2.0f * n_dot_l / (n_dot_l + sqrt(ggx_alpha2 + (1.0f - ggx_alpha2) * n_dot_l * n_dot_l) + 0.00001f);
+			float geometry_term= ggx_gv * ggx_gl;
+
+			// Schlick Fresnel (F0 = 0.04 for dielectric)
+			float fresnel= 0.04f + 0.96f * safe_pow(1.0f - v_dot_h, 5.0f);
+
+			// Combined BRDF: D * G * F / (4 * NdotV * NdotL)
+			float spec= distribution * saturate(geometry_term) / (3.14159265f * n_dot_v + 0.00001f) * fresnel;
+			specularly_reflected_light += light_radiance * min(spec, n_dot_l + 1.0f);
+		}
 	}
-	specularly_reflected_light *= specular_power;
 }
 
 
