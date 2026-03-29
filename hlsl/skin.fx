@@ -108,7 +108,7 @@ accum_pixel static_per_pixel_ps(
 {
 	float4 out_color= float4(1.0f, 1.0f, 1.0f, 1.0f);
 #ifdef ACCUM_PIXEL_HAS_MV
-	g_motion_vector_passthrough = motion_vector;
+	g_motion_vector_passthrough.xy = motion_vector;
 #endif
 	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(out_color, true, false);
 }
@@ -168,7 +168,7 @@ accum_pixel dynamic_light_ps(
 {
 	float4 out_color= float4(1.0f, 1.0f, 1.0f, 1.0f);
 #ifdef ACCUM_PIXEL_HAS_MV
-	g_motion_vector_passthrough = motion_vector;
+	g_motion_vector_passthrough.xy = motion_vector;
 #endif
 	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(out_color, true, false);
 }
@@ -249,7 +249,7 @@ accum_pixel static_prt_ps(
 {
 	float4 out_color= float4(1.0f, 1.0f, 1.0f, 1.0f);
 #ifdef ACCUM_PIXEL_HAS_MV
-	g_motion_vector_passthrough = motion_vector;
+	g_motion_vector_passthrough.xy = motion_vector;
 #endif
 	return convert_to_render_target(out_color, true, true);
 }
@@ -287,7 +287,7 @@ accum_pixel static_sh_ps(
 {
 	float4 out_color= float4(1.0f, 1.0f, 1.0f, 1.0f);
 #ifdef ACCUM_PIXEL_HAS_MV
-	g_motion_vector_passthrough = motion_vector;
+	g_motion_vector_passthrough.xy = motion_vector;
 #endif
 	return convert_to_render_target(out_color, true, true);
 }

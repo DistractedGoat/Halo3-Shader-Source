@@ -206,7 +206,19 @@ float4 default_ps(SCREEN_POSITION_INPUT(screen_position), in float2 texcoord :TE
 		ao = lerp(ao, 1.0f, saturate(fog * 2.0f));
 	}
 
-	combined.rgb *= ao;
+	// SH chromaticity tinted AO — ambient color from lightmap L0 DC
+	float2 sh_chroma_rg = sample2D(mv_buffer, texcoord).ba;
+	float3 ao_tint = float3(sh_chroma_rg.x, sh_chroma_rg.y, 1.0 - sh_chroma_rg.x - sh_chroma_rg.y);
+	ao_tint = ao_tint / max(dot(ao_tint, float3(1, 1, 1)), 0.001);
+
+	// Tuning: 0=monochrome AO, 1=full chromaticity tint
+	float ao_color_saturation = 0.5;
+	ao_tint = lerp(float3(0.333, 0.333, 0.333), ao_tint, ao_color_saturation);
+	ao_tint = ao_tint / max(dot(ao_tint, float3(1, 1, 1)), 0.001);
+
+	// ao=1 → white (no effect); ao<1 → tinted toward ambient color
+	float3 ao_color = lerp(ao_tint, float3(1, 1, 1), ao);
+	combined.rgb *= ao_color;
 	// === end AO ===
 
 	// SSR now injected per-surface (water_shading.fx), not here

@@ -163,7 +163,7 @@ accum_pixel static_per_pixel_ps(
 	) : SV_Target
 {
 #ifdef ACCUM_PIXEL_HAS_MV
-	g_motion_vector_passthrough = motion_vector;
+	g_motion_vector_passthrough.xy = motion_vector;
 #endif
 	float4 out_color= float4(1.0f, 1.0f, 1.0f, 1.0f);
 	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(out_color, true, false);
@@ -226,7 +226,7 @@ accum_pixel static_sh_ps(
 	) : SV_Target
 {
 #ifdef ACCUM_PIXEL_HAS_MV
-	g_motion_vector_passthrough = motion_vector;
+	g_motion_vector_passthrough.xy = motion_vector;
 #endif
 	//tint color
 #if DX_VERSION == 11
@@ -297,7 +297,7 @@ accum_pixel dynamic_light_ps(
 	)
 {
 #ifdef ACCUM_PIXEL_HAS_MV
-	g_motion_vector_passthrough = motion_vector;
+	g_motion_vector_passthrough.xy = motion_vector;
 #endif
 	float4 out_color= float4(1.0f, 1.0f, 1.0f, 1.0f);
 	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(out_color, true, false);

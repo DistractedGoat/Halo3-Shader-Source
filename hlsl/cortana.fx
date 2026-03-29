@@ -403,7 +403,7 @@ accum_pixel static_prt_ps(
 		misc);
 
 #ifdef ACCUM_PIXEL_HAS_MV
-	g_motion_vector_passthrough = vsout.motion_vector;
+	g_motion_vector_passthrough.xy = vsout.motion_vector;
 #endif
 
 	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(out_color, true, false);
@@ -515,7 +515,7 @@ accum_pixel static_sh_ps(
 		misc);
 
 #ifdef ACCUM_PIXEL_HAS_MV
-	g_motion_vector_passthrough = vsout.motion_vector;
+	g_motion_vector_passthrough.xy = vsout.motion_vector;
 #endif
 
 	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(out_color, true, false);
@@ -633,7 +633,7 @@ accum_pixel active_camo_ps(
 	float4 result= float4(true_scene_color, 1.0f);
 
 #ifdef ACCUM_PIXEL_HAS_MV
-	g_motion_vector_passthrough = vsout.motion_vector;
+	g_motion_vector_passthrough.xy = vsout.motion_vector;
 #endif
 
 	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(result, false, false);

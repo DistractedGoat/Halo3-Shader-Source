@@ -1103,7 +1103,7 @@ color_reflection= environment_sample.rgb * alpha;
 */
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 	
-g_motion_vector_passthrough = normal.xy * 0.5 + 0.5;
+g_motion_vector_passthrough.xy = normal.xy * 0.5 + 0.5;
 
 return convert_to_render_target(float4(output_color, 1.0f), true, true);		
 }

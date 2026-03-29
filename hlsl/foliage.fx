@@ -294,7 +294,7 @@ accum_pixel static_common_ps(
 #endif
    
 #ifdef ACCUM_PIXEL_HAS_MV
-	g_motion_vector_passthrough = vsout.motion_vector;
+	g_motion_vector_passthrough.xy = vsout.motion_vector;
 #endif
 
 	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(out_color, true, false);

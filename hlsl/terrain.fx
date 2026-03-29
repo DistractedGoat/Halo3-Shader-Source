@@ -1135,6 +1135,19 @@ accum_pixel static_lighting_shared_ps(
 	float3 diffuse_light= 0.0f;
 	diffuse_light= ravi_order_3(bump_normal, sh_lighting_coefficients);
 
+	// halo3-ng: SH chromaticity from DC (ravi_order_3 doesn't modify coefficients)
+#ifdef ACCUM_PIXEL_HAS_MV
+	{
+		float3 dr = max(sh_lighting_coefficients[0].rgb, 0.0);
+		float dr_sum = dr.r + dr.g + dr.b;
+		if (dr_sum > 0.0001)
+		{
+			g_motion_vector_passthrough.z = dr.r / dr_sum;
+			g_motion_vector_passthrough.w = dr.g / dr_sum;
+		}
+	}
+#endif
+
 	// if any material is specular, evaluate the combined specular lobe
 	float3 analytical_specular_light= 0.0f;
 	float3 area_specular_light= 0.0f;
@@ -1219,7 +1232,7 @@ accum_pixel static_per_pixel_ps(
 	)
 {
 #ifdef ACCUM_PIXEL_HAS_MV
-	g_motion_vector_passthrough = motion_vector;
+	g_motion_vector_passthrough.xy = motion_vector;
 #endif
 	entry_point_data data;
 	BUILD_ENTRY_POINT_DATA(data);
@@ -1296,7 +1309,7 @@ accum_pixel static_per_vertex_ps(
 	)
 {
 #ifdef ACCUM_PIXEL_HAS_MV
-	g_motion_vector_passthrough = motion_vector;
+	g_motion_vector_passthrough.xy = motion_vector;
 #endif
 	entry_point_data data;
 	BUILD_ENTRY_POINT_DATA(data);
@@ -1358,7 +1371,7 @@ accum_pixel static_sh_ps(
 	)
 {
 #ifdef ACCUM_PIXEL_HAS_MV
-	g_motion_vector_passthrough = motion_vector;
+	g_motion_vector_passthrough.xy = motion_vector;
 #endif
 	entry_point_data data;
 	BUILD_ENTRY_POINT_DATA(data);
@@ -1440,7 +1453,7 @@ accum_pixel dynamic_light_ps(
 	)
 {
 #ifdef ACCUM_PIXEL_HAS_MV
-	g_motion_vector_passthrough = motion_vector;
+	g_motion_vector_passthrough.xy = motion_vector;
 #endif
 	// get blend values
 	float4 blend= sample_blend_normalized(texcoord);
@@ -1617,7 +1630,7 @@ accum_pixel lightmap_debug_mode_ps(
 	) : SV_Target
 {
 #ifdef ACCUM_PIXEL_HAS_MV
-	g_motion_vector_passthrough = motion_vector;
+	g_motion_vector_passthrough.xy = motion_vector;
 #endif
 	float4 out_color;
 

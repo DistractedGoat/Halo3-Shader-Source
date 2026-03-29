@@ -581,10 +581,19 @@ accum_pixel static_per_pixel_ps(
 	}
 
 #ifdef ACCUM_PIXEL_HAS_MV
-	g_motion_vector_passthrough = vsout.motion_vector;
+	g_motion_vector_passthrough.xy = vsout.motion_vector;
+	{
+		float3 dc = max(sh_coefficients[0], 0.0);
+		float dc_sum = dc.r + dc.g + dc.b;
+		if (dc_sum > 0.001)
+		{
+			g_motion_vector_passthrough.z = dc.r / dc_sum;
+			g_motion_vector_passthrough.w = dc.g / dc_sum;
+		}
+	}
 #endif
 	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(out_color, true, false);
-	
+
 }
 
 ///constant to do order 2 SH convolution
@@ -700,9 +709,18 @@ accum_pixel static_sh_ps(
 
 
 #ifdef ACCUM_PIXEL_HAS_MV
-	g_motion_vector_passthrough = vsout.motion_vector;
+	g_motion_vector_passthrough.xy = vsout.motion_vector;
+	{
+		float3 dc = max(p_lighting_constant_0.rgb, 0.0);
+		float dc_sum = dc.r + dc.g + dc.b;
+		if (dc_sum > 0.001)
+		{
+			g_motion_vector_passthrough.z = dc.r / dc_sum;
+			g_motion_vector_passthrough.w = dc.g / dc_sum;
+		}
+	}
 #endif
-	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(out_color, true, false);	
+	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(out_color, true, false);
 }
 
 ///constant to do order 2 SH convolution
@@ -859,9 +877,18 @@ accum_pixel static_per_vertex_ps(
 		false);
 		
 #ifdef ACCUM_PIXEL_HAS_MV
-	g_motion_vector_passthrough = vsout.motion_vector;
+	g_motion_vector_passthrough.xy = vsout.motion_vector;
+	{
+		float3 dc = max(float3(vsout.probe0_3_r.x, vsout.probe0_3_g.x, vsout.probe0_3_b.x), 0.0);
+		float dc_sum = dc.r + dc.g + dc.b;
+		if (dc_sum > 0.001)
+		{
+			g_motion_vector_passthrough.z = dc.r / dc_sum;
+			g_motion_vector_passthrough.w = dc.g / dc_sum;
+		}
+	}
 #endif
-	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(out_color, true, false);	
+	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(out_color, true, false);
 }
 
 //straight vert color
@@ -986,9 +1013,9 @@ accum_pixel static_per_vertex_color_ps(
 #endif
 	//out_color.xyz= vert_color * g_exposure.rgb;
 	out_color.w= ALPHA_CHANNEL_OUTPUT;
-		
+
 #ifdef ACCUM_PIXEL_HAS_MV
-	g_motion_vector_passthrough = vsout.motion_vector;
+	g_motion_vector_passthrough.xy = vsout.motion_vector;
 #endif
 	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(out_color, true, false);
 	
@@ -1310,9 +1337,18 @@ accum_pixel static_prt_ps(
 		misc);
 				
 #ifdef ACCUM_PIXEL_HAS_MV
-	g_motion_vector_passthrough = vsout.motion_vector;
+	g_motion_vector_passthrough.xy = vsout.motion_vector;
+	{
+		float3 dc = max(p_lighting_constant_0.rgb, 0.0);
+		float dc_sum = dc.r + dc.g + dc.b;
+		if (dc_sum > 0.001)
+		{
+			g_motion_vector_passthrough.z = dc.r / dc_sum;
+			g_motion_vector_passthrough.w = dc.g / dc_sum;
+		}
+	}
 #endif
-	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(out_color, true, false);	
+	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(out_color, true, false);
 }
 
 struct dynamic_light_vsout
@@ -1522,7 +1558,7 @@ accum_pixel default_dynamic_light_ps(
 	out_color.w= ALPHA_CHANNEL_OUTPUT;
 
 #ifdef ACCUM_PIXEL_HAS_MV
-	g_motion_vector_passthrough = vsout.motion_vector;
+	g_motion_vector_passthrough.xy = vsout.motion_vector;
 #endif
 	return convert_to_render_target(out_color, true, true);
 }
@@ -1618,10 +1654,10 @@ accum_pixel lightmap_debug_mode_ps(
 		ambient_only,
 		linear_only,
 		quadratic);
-		
+
 #ifdef ACCUM_PIXEL_HAS_MV
-	g_motion_vector_passthrough = vsout.motion_vector;
+	g_motion_vector_passthrough.xy = vsout.motion_vector;
 #endif
 	return convert_to_render_target(out_color, true, false);
-	
+
 }

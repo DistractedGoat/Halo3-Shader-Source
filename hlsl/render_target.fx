@@ -13,7 +13,7 @@
 #endif
 
 #ifdef ACCUM_PIXEL_HAS_MV
-static float2 g_motion_vector_passthrough = float2(0, 0);
+static float4 g_motion_vector_passthrough = float4(0, 0, 0.333, 0.333);
 #endif
 
 // our output format
@@ -30,7 +30,7 @@ struct accum_pixel
 	   float4 dark_color : SV_Target1;		// HDR buffer output -> render target 1
    #endif
    #ifdef ACCUM_PIXEL_HAS_MV
-	   float2 motion_vector : SV_Target2;	// motion vectors -> render target 2 (halo3-ng)
+	   float4 motion_vector : SV_Target2;	// motion vectors xy + SH chromaticity zw -> render target 2 (halo3-ng)
    #endif
 #endif
 };

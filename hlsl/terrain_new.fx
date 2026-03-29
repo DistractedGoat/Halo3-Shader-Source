@@ -967,6 +967,18 @@ accum_pixel static_lighting_shared_ps_linear_with_dominant_light(
 	get_sh_coefficients(data, sh_lighting_coefficients, dominant_light_direction, dominant_light_intensity,
 	                    l2_sh_quadratic, l2_active);
 
+#ifdef ACCUM_PIXEL_HAS_MV
+	{
+		float3 dc = max(sh_lighting_coefficients[0].rgb, 0.0);
+		float dc_sum = dc.r + dc.g + dc.b;
+		if (dc_sum > 0.001)
+		{
+			g_motion_vector_passthrough.z = dc.r / dc_sum;
+			g_motion_vector_passthrough.w = dc.g / dc_sum;
+		}
+	}
+#endif
+
 	// get blend values
 	float4 blend= sample_blend_normalized_for_lighting(original_texcoord);
 	
@@ -1117,7 +1129,7 @@ accum_pixel static_per_pixel_ps(
 )
 {
 #ifdef ACCUM_PIXEL_HAS_MV
-	g_motion_vector_passthrough = motion_vector;
+	g_motion_vector_passthrough.xy = motion_vector;
 #endif
 	entry_point_data data;
 	BUILD_ENTRY_POINT_DATA(data);
@@ -1228,7 +1240,7 @@ accum_pixel static_per_vertex_ps(
 )
 {
 #ifdef ACCUM_PIXEL_HAS_MV
-	g_motion_vector_passthrough = motion_vector;
+	g_motion_vector_passthrough.xy = motion_vector;
 #endif
 	entry_point_data data;
 	BUILD_ENTRY_POINT_DATA(data);
@@ -1297,7 +1309,7 @@ accum_pixel static_sh_ps(
 )
 {
 #ifdef ACCUM_PIXEL_HAS_MV
-	g_motion_vector_passthrough = motion_vector;
+	g_motion_vector_passthrough.xy = motion_vector;
 #endif
 	entry_point_data data;
 	BUILD_ENTRY_POINT_DATA(data);
@@ -1551,7 +1563,7 @@ accum_pixel static_prt_ps(
 )
 {
 #ifdef ACCUM_PIXEL_HAS_MV
-	g_motion_vector_passthrough = motion_vector;
+	g_motion_vector_passthrough.xy = motion_vector;
 #endif
 	entry_point_data data;
 	BUILD_ENTRY_POINT_DATA(data);
@@ -1700,7 +1712,7 @@ accum_pixel default_dynamic_light_ps(
 	bool cinematic)
 {
 #ifdef ACCUM_PIXEL_HAS_MV
-	g_motion_vector_passthrough = motion_vector;
+	g_motion_vector_passthrough.xy = motion_vector;
 #endif
 	// get blend values
 	float4 blend= sample_blend_normalized_for_lighting(texcoord);
