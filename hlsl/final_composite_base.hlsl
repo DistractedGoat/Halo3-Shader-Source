@@ -36,6 +36,14 @@ LOCAL_SAMPLER_2D(mv_buffer, 12);
 // Previous frame VP matrix as 4x1 texture (bound by 3DMigoto for camera MV fallback)
 LOCAL_SAMPLER_2D(prev_vp_texture, 13);
 
+// SSGI albedo buffer (bound by 3DMigoto at runtime via ShaderOverride ps-t14)
+LOCAL_SAMPLER_2D(ssgi_albedo_buffer, 14);
+
+// SSGI GI color buffer (bound by 3DMigoto at ps-t15 when y==1 / F12 toggle)
+// float4(.rgb=GI indirect color, .a=viewZ) from dedicated 15m-radius SSGI pass
+LOCAL_SAMPLER_2D(ssgi_buffer, 15);
+
+
 // SSR removed from final_composite — now injected per-surface (water_shading.fx etc.)
 
 // --- 4x4 matrix inverse (adjugate / determinant) ---
@@ -194,8 +202,10 @@ float4 default_ps(SCREEN_POSITION_INPUT(screen_position), in float2 texcoord :TE
 	float reproject_weight = smoothstep(1.5f, 3.0f, z_view_reproject);
 	float2 ao_uv = texcoord - mv_ao * reproject_weight;
 
-	float ao = sample2D(ao_buffer, ao_uv).r;
-	ao = (ao > 0.001f) ? saturate(ao) : 1.0f;	// safe: unbound texture = no effect
+	// ao_buffer carries float4(ao, ao, ao, viewZ) from GTAO pass
+	// .a = viewZ serves as real-surface flag: 0 for sky/unbound → fallback ao=1.0
+	float4 ao_sample = sample2D(ao_buffer, ao_uv);
+	float ao = (ao_sample.a > 0.001f) ? saturate(ao_sample.r) : 1.0f;	// safe: unbound/sky/water → ao=1.0
 
 	if (depth_val > 0.0f && ao < 1.0f)
 	{
@@ -203,7 +213,9 @@ float4 default_ps(SCREEN_POSITION_INPUT(screen_position), in float2 texcoord :TE
 		float dist = min(max(z_view + v_atmosphere_constant_0.w, 0.0f), v_atmosphere_constant_1.w);
 		float3 extinction = exp2(-(v_atmosphere_constant_2.xyz + v_atmosphere_constant_3.xyz) * dist);
 		float fog = 1.0f - dot(extinction, float3(0.333f, 0.333f, 0.333f));
-		ao = lerp(ao, 1.0f, saturate(fog * 2.0f));
+		// ao_fog_scale: higher = AO fades sooner (2.0=default, try 4-8 for heavier fog scenes)
+		float ao_fog_scale = 7.0f;
+		ao = lerp(ao, 1.0f, saturate(fog * ao_fog_scale));
 	}
 
 	// SH chromaticity tinted AO — ambient color from lightmap L0 DC
@@ -216,9 +228,59 @@ float4 default_ps(SCREEN_POSITION_INPUT(screen_position), in float2 texcoord :TE
 	ao_tint = lerp(float3(0.333, 0.333, 0.333), ao_tint, ao_color_saturation);
 	ao_tint = ao_tint / max(dot(ao_tint, float3(1, 1, 1)), 0.001);
 
+	// === SSGI indirect diffuse with display-time reprojection ===
+	// Added BEFORE AO multiply so AO applies uniformly to direct+indirect — preserves AO contrast.
+	{
+		// Reuse AO's reprojected UV (mv_ao + weapon fade already computed above)
+		// ssgi_buffer = dedicated 15m-radius GI pass, float4(.rgb=GI, .a=viewZ)
+		float4 gi_reproj = sample2D(ssgi_buffer, saturate(texcoord - mv_ao * reproject_weight));
+		float3 gi_color = gi_reproj.rgb;
+
+		// Strength scalar applied first, before any fading
+		float ssgi_strength = 7.0f;   // indirect brightness scalar
+		gi_color *= ssgi_strength;
+
+		// viewZ from SSGI buffer .a — always valid, no dependency on AO toggle / t11 binding
+		float z_view_gi = sample2D(ssgi_buffer, texcoord).a;
+
+		// Distance fade — predictable world-space falloff
+		if (z_view_gi > 0.001f)  // 0 = sky/water sentinel
+		{
+
+			// Atmospheric fade on top — suppresses any remaining GI where fog is heavy
+			float dist_gi = min(max(z_view_gi + v_atmosphere_constant_0.w, 0.0f), v_atmosphere_constant_1.w);
+			float3 extinction_gi = exp2(-(v_atmosphere_constant_2.xyz + v_atmosphere_constant_3.xyz) * dist_gi);
+			float fog_gi = 1.0f - dot(extinction_gi, float3(0.333f, 0.333f, 0.333f));
+			float ssgi_fog_scale = 1.0f;
+			gi_color *= saturate(1.0f - fog_gi * ssgi_fog_scale);
+		}
+	
+		// Two-factor receiver: low-freq level from lit scene + high-freq detail from albedo.
+		// receiverWeight: shadows suppress GI (uses actual lit luminance, not raw albedo).
+		// albedoDetail: preserves local texture variation (albedo normalized to its own luminance).
+		//   Soft normalization: albedo / (albedoLum + 0.1) keeps near-black from exploding.
+		//   Clamped to [0.3..2.0]: no texel contributes more than 2x or less than 0.3x average.
+		float ssgi_receiver_power = 0.5f;  // <1=compressed (sqrt-like), 1=linear, >1=strong hotspot
+		float ssgi_receiver_floor = 0.2f;  // minimum GI contribution on fully dark surfaces (0=none)
+		float ssgi_detail_blend  = 0.5f;   // 0=no texture detail, 1=full albedo detail modulation
+		float receiverLum = dot(combined.rgb, float3(0.2126f, 0.7152f, 0.0722f));
+		float receiverWeight = lerp(ssgi_receiver_floor, 1.0f, pow(saturate(receiverLum * 4.0f), ssgi_receiver_power));
+		float3 albedo_gi = sample2D(ssgi_albedo_buffer, texcoord).rgb;
+		float albedoLum_gi = dot(albedo_gi, float3(0.2126f, 0.7152f, 0.0722f));
+		float3 albedoDetail = clamp(albedo_gi / (albedoLum_gi + 0.1f), 0.3f, 2.0f);
+		float3 giReceiver = receiverWeight * lerp(float3(1.0f, 1.0f, 1.0f), albedoDetail, ssgi_detail_blend);
+		combined.rgb += gi_color * giReceiver;
+	}
+	// === end SSGI ===
+
+	// AO applied AFTER SSGI — darkens direct+indirect uniformly so AO contrast is unaffected by SSGI.
 	// ao=1 → white (no effect); ao<1 → tinted toward ambient color
-	float3 ao_color = lerp(ao_tint, float3(1, 1, 1), ao);
-	combined.rgb *= ao_color;
+	float ao_scene_power    = 2.0f;    // >1 darkens AO contrast (pow curve on ao value)
+	float ao_scene_strength = 1.0f;    // 0=no AO darkening, 1=full scene darkening
+	float ao_dark_floor     = 0.01f;    // 0=fully black at max occlusion, 0.333=original tint floor, tune between
+	float ao_darkened = pow(ao, ao_scene_power);
+	float3 ao_color = lerp(ao_tint * ao_dark_floor, float3(1, 1, 1), ao_darkened);
+	combined.rgb *= lerp(float3(1, 1, 1), ao_color, ao_scene_strength);
 	// === end AO ===
 
 	// SSR now injected per-surface (water_shading.fx), not here
@@ -254,6 +316,7 @@ float4 default_ps(SCREEN_POSITION_INPUT(screen_position), in float2 texcoord :TE
    result.rgb = lerp(cg0, cg1, cg_blend_factor.x);
 
 	result.a= sqrt( dot(result.rgb, float3(0.299, 0.587, 0.114)) );
+
 
 	// === Motion vector debug (disabled — t12 now always bound for AO reproject) ===
 	// To re-enable: need a separate flag mechanism (t12 is no longer conditionally bound)
