@@ -15,37 +15,42 @@ float4 default_ps(screen_output IN) : SV_Target
 //	sample.y= sample0.y - 4.5 * source_pixel_size.y;
 //	sample.x += source_pixel_size.x / 2;
 
-	sample.y -= 5.0 * ps_postprocess_pixel_size.y;	// -5
+	// Scale step size to maintain consistent screen-space bloom radius at any resolution.
+	// Reference: Xbox 360 bloom buffer (1152x640 / 2 = 576x320).
+	float blur_scale_y = max(1.0, (1.0/320.0) / ps_postprocess_pixel_size.y);
+	float scaled_step = ps_postprocess_pixel_size.y * blur_scale_y;
+
+	sample.y -= 5.0 * scaled_step;	// -5
 	float3 color= (1/1024.0) *convert_from_bloom_buffer(sample2D(target_sampler, sample));
 
-	sample.y += ps_postprocess_pixel_size.y;			// -4
+	sample.y += scaled_step;			// -4
 	color += (10/1024.0) *convert_from_bloom_buffer(sample2D(target_sampler, sample));
 
-	sample.y += ps_postprocess_pixel_size.y;			// -3
+	sample.y += scaled_step;			// -3
 	color += (45/1024.0) *convert_from_bloom_buffer(sample2D(target_sampler, sample));
 
-	sample.y += ps_postprocess_pixel_size.y;			// -2
+	sample.y += scaled_step;			// -2
 	color += (120/1024.0) *convert_from_bloom_buffer(sample2D(target_sampler, sample));
 
-	sample.y += ps_postprocess_pixel_size.y;			// -1
+	sample.y += scaled_step;			// -1
 	color += (210/1024.0) *convert_from_bloom_buffer(sample2D(target_sampler, sample));
 
-	sample.y += ps_postprocess_pixel_size.y;			// 0
+	sample.y += scaled_step;			// 0
 	color += (252/1024.0) *convert_from_bloom_buffer(sample2D(target_sampler, sample));
 
-	sample.y += ps_postprocess_pixel_size.y;			// +1
+	sample.y += scaled_step;			// +1
 	color += (210/1024.0) *convert_from_bloom_buffer(sample2D(target_sampler, sample));
 
-	sample.y += ps_postprocess_pixel_size.y;			// +2
+	sample.y += scaled_step;			// +2
 	color += (120/1024.0) *convert_from_bloom_buffer(sample2D(target_sampler, sample));
 
-	sample.y += ps_postprocess_pixel_size.y;			// +3
+	sample.y += scaled_step;			// +3
 	color += (45/1024.0) *convert_from_bloom_buffer(sample2D(target_sampler, sample));
 
-	sample.y += ps_postprocess_pixel_size.y;			// +4
+	sample.y += scaled_step;			// +4
 	color += (10/1024.0) *convert_from_bloom_buffer(sample2D(target_sampler, sample));
 
-	sample.y += ps_postprocess_pixel_size.y;			// +5
+	sample.y += scaled_step;			// +5
 	color += (1/1024.0) *convert_from_bloom_buffer(sample2D(target_sampler, sample));
 
 	return convert_to_bloom_buffer(color);
