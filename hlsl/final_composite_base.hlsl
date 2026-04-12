@@ -36,13 +36,10 @@ LOCAL_SAMPLER_2D(mv_buffer, 12);
 // Previous frame VP matrix as 4x1 texture (bound by 3DMigoto for camera MV fallback)
 LOCAL_SAMPLER_2D(prev_vp_texture, 13);
 
-// SSGI albedo buffer (bound by 3DMigoto at runtime via ShaderOverride ps-t14)
-LOCAL_SAMPLER_2D(ssgi_albedo_buffer, 14);
 
 // SSGI GI color buffer (bound by 3DMigoto at ps-t15 when y==1 / F12 toggle)
 // float4(.rgb=GI indirect color, .a=viewZ) from dedicated 15m-radius SSGI pass
 LOCAL_SAMPLER_2D(ssgi_buffer, 15);
-
 
 // SSR removed from final_composite — now injected per-surface (water_shading.fx etc.)
 
@@ -237,24 +234,26 @@ float4 default_ps(SCREEN_POSITION_INPUT(screen_position), in float2 texcoord :TE
 		float3 gi_color = gi_reproj.rgb;
 
 		// Strength scalar applied first, before any fading
-		float ssgi_strength = 7.0f;   // indirect brightness scalar
+		float ssgi_strength = 3.0f;   // indirect brightness scalar
 		gi_color *= ssgi_strength;
 
-		// viewZ from SSGI buffer .a — always valid, no dependency on AO toggle / t11 binding
+		// viewZ from SSGI buffer .a — used only for fog fade distance.
+		// NOTE: do NOT gate the GI add on this value. It's 1-frame stale at texcoord (non-reprojected),
+		// so after camera movement it may show sky sentinel (0) for pixels that now have real geometry,
+		// which would suppress GI on freshly-visible scene pixels. True sky pixels are safe regardless
+		// because the SSGI trace writes gi_color=(0,0,0) for sky, making the add a no-op.
 		float z_view_gi = sample2D(ssgi_buffer, texcoord).a;
 
-		// Distance fade — predictable world-space falloff
-		if (z_view_gi > 0.001f)  // 0 = sky/water sentinel
+		// Atmospheric fade — only meaningful for scene pixels (z_view_gi > 0)
+		if (z_view_gi > 0.001f)
 		{
-
-			// Atmospheric fade on top — suppresses any remaining GI where fog is heavy
 			float dist_gi = min(max(z_view_gi + v_atmosphere_constant_0.w, 0.0f), v_atmosphere_constant_1.w);
 			float3 extinction_gi = exp2(-(v_atmosphere_constant_2.xyz + v_atmosphere_constant_3.xyz) * dist_gi);
 			float fog_gi = 1.0f - dot(extinction_gi, float3(0.333f, 0.333f, 0.333f));
-			float ssgi_fog_scale = 1.0f;
+			float ssgi_fog_scale = 7.0f;
 			gi_color *= saturate(1.0f - fog_gi * ssgi_fog_scale);
 		}
-	
+
 		// Two-factor receiver: low-freq level from lit scene + high-freq detail from albedo.
 		// receiverWeight: shadows suppress GI (uses actual lit luminance, not raw albedo).
 		// albedoDetail: preserves local texture variation (albedo normalized to its own luminance).
@@ -265,7 +264,9 @@ float4 default_ps(SCREEN_POSITION_INPUT(screen_position), in float2 texcoord :TE
 		float ssgi_detail_blend  = 0.5f;   // 0=no texture detail, 1=full albedo detail modulation
 		float receiverLum = dot(combined.rgb, float3(0.2126f, 0.7152f, 0.0722f));
 		float receiverWeight = lerp(ssgi_receiver_floor, 1.0f, pow(saturate(receiverLum * 4.0f), ssgi_receiver_power));
-		float3 albedo_gi = sample2D(ssgi_albedo_buffer, texcoord).rgb;
+		// albedo_texture (t16) persists from shadow_apply as a stale SRV — same mechanism as
+		// normal_texture at t17. No 3DMigoto injection needed.
+		float3 albedo_gi = albedo_texture.Load(int3(int2(texcoord * float2(1920.0f, 1080.0f)), 0)).rgb;
 		float albedoLum_gi = dot(albedo_gi, float3(0.2126f, 0.7152f, 0.0722f));
 		float3 albedoDetail = clamp(albedo_gi / (albedoLum_gi + 0.1f), 0.3f, 2.0f);
 		float3 giReceiver = receiverWeight * lerp(float3(1.0f, 1.0f, 1.0f), albedoDetail, ssgi_detail_blend);
@@ -314,6 +315,11 @@ float4 default_ps(SCREEN_POSITION_INPUT(screen_position), in float2 texcoord :TE
    float3 cg0 = sample3D(color_grading0, cgTexC).rgb;
    float3 cg1 = sample3D(color_grading1, cgTexC).rgb;
    result.rgb = lerp(cg0, cg1, cg_blend_factor.x);
+
+	// Saturation boost — compensates for SSGI indirect diffuse washing out colors slightly
+	float sat_boost = 1.3f;  // 1.0=neutral, >1=more saturated, tune to taste
+	float sat_luma = dot(result.rgb, float3(0.2126f, 0.7152f, 0.0722f));
+	result.rgb = lerp(sat_luma.xxx, result.rgb, sat_boost);
 
 	result.a= sqrt( dot(result.rgb, float3(0.299, 0.587, 0.114)) );
 

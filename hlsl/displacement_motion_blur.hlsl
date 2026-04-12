@@ -11,6 +11,7 @@
 #define LDR_ALPHA_ADJUST g_exposure.w
 #define HDR_ALPHA_ADJUST g_exposure.b
 #define DARK_COLOR_MULTIPLIER g_exposure.g
+#define NO_MV_OUTPUT   // screen-space effect: HPosition.zw=1.0f gives wrong near-plane depth
 #include "render_target.fx"
 
 #include "displacement_registers.fx"

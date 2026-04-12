@@ -580,6 +580,9 @@ accum_pixel static_per_pixel_ps(
 
 	}
 
+#ifdef ACCUM_PIXEL_HAS_DEPTH
+	g_raw_depth_passthrough = vsout.position.z;
+#endif
 #ifdef ACCUM_PIXEL_HAS_MV
 	g_motion_vector_passthrough.xy = vsout.motion_vector;
 	{
@@ -708,6 +711,9 @@ accum_pixel static_sh_ps(
 		misc);
 
 
+#ifdef ACCUM_PIXEL_HAS_DEPTH
+	g_raw_depth_passthrough = vsout.position.z;
+#endif
 #ifdef ACCUM_PIXEL_HAS_MV
 	g_motion_vector_passthrough.xy = vsout.motion_vector;
 	{
@@ -876,6 +882,9 @@ accum_pixel static_per_vertex_ps(
 		l2_quad_zero,
 		false);
 		
+#ifdef ACCUM_PIXEL_HAS_DEPTH
+	g_raw_depth_passthrough = vsout.position.z;
+#endif
 #ifdef ACCUM_PIXEL_HAS_MV
 	g_motion_vector_passthrough.xy = vsout.motion_vector;
 	{
@@ -1014,6 +1023,9 @@ accum_pixel static_per_vertex_color_ps(
 	//out_color.xyz= vert_color * g_exposure.rgb;
 	out_color.w= ALPHA_CHANNEL_OUTPUT;
 
+#ifdef ACCUM_PIXEL_HAS_DEPTH
+	g_raw_depth_passthrough = vsout.position.z;
+#endif
 #ifdef ACCUM_PIXEL_HAS_MV
 	g_motion_vector_passthrough.xy = vsout.motion_vector;
 #endif
@@ -1336,6 +1348,9 @@ accum_pixel static_prt_ps(
 		vsout.inscatter,
 		misc);
 				
+#ifdef ACCUM_PIXEL_HAS_DEPTH
+	g_raw_depth_passthrough = vsout.position.z;
+#endif
 #ifdef ACCUM_PIXEL_HAS_MV
 	g_motion_vector_passthrough.xy = vsout.motion_vector;
 	{
@@ -1557,6 +1572,9 @@ accum_pixel default_dynamic_light_ps(
 	// set alpha channel
 	out_color.w= ALPHA_CHANNEL_OUTPUT;
 
+#ifdef ACCUM_PIXEL_HAS_DEPTH
+	g_raw_depth_passthrough = vsout.position.z;
+#endif
 #ifdef ACCUM_PIXEL_HAS_MV
 	g_motion_vector_passthrough.xy = vsout.motion_vector;
 #endif
@@ -1655,6 +1673,9 @@ accum_pixel lightmap_debug_mode_ps(
 		linear_only,
 		quadratic);
 
+#ifdef ACCUM_PIXEL_HAS_DEPTH
+	g_raw_depth_passthrough = vsout.position.z;
+#endif
 #ifdef ACCUM_PIXEL_HAS_MV
 	g_motion_vector_passthrough.xy = vsout.motion_vector;
 #endif

@@ -7,13 +7,22 @@
 #define HALO3_RT_OUTPUT_DEBUG 0
 
 // halo3-ng: MV output gating
-// Shaders that define NO_MV_OUTPUT (shadow_apply*.hlsl) skip SV_Target2
+// Shaders that define NO_MV_OUTPUT (shadow_apply*.hlsl) skip SV_Target2 and SV_Target3
 #if defined(ENABLE_MOTION_VECTORS) && !defined(NO_MV_OUTPUT)
 #define ACCUM_PIXEL_HAS_MV 1
+#endif
+// Depth capture: active for all forward geometry regardless of ENABLE_MOTION_VECTORS.
+// shadow_apply defines NO_MV_OUTPUT → no depth output (fullscreen quad, not geometry).
+// displacement.hlsl/displacement_motion_blur.hlsl define NO_MV_OUTPUT → prevents near-plane contamination.
+#ifndef NO_MV_OUTPUT
+#define ACCUM_PIXEL_HAS_DEPTH 1
 #endif
 
 #ifdef ACCUM_PIXEL_HAS_MV
 static float4 g_motion_vector_passthrough = float4(0, 0, 0.333, 0.333);
+#endif
+#ifdef ACCUM_PIXEL_HAS_DEPTH
+static float  g_raw_depth_passthrough     = 0.0f;  // raw reverse-Z depth (SV_Position.z), written to SV_Target3
 #endif
 
 // our output format
@@ -31,6 +40,9 @@ struct accum_pixel
    #endif
    #ifdef ACCUM_PIXEL_HAS_MV
 	   float4 motion_vector : SV_Target2;	// motion vectors xy + SH chromaticity zw -> render target 2 (halo3-ng)
+   #endif
+   #ifdef ACCUM_PIXEL_HAS_DEPTH
+	   float  rawDepth      : SV_Target3;	// raw reverse-Z depth (SV_Position.z) -> render target 3 (halo3-ng)
    #endif
 #endif
 };
@@ -78,6 +90,9 @@ struct accum_pixel
 
 #ifdef ACCUM_PIXEL_HAS_MV
 	result.motion_vector = g_motion_vector_passthrough;
+#endif
+#ifdef ACCUM_PIXEL_HAS_DEPTH
+	result.rawDepth      = g_raw_depth_passthrough;
 #endif
 
 	return result;

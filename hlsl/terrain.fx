@@ -1233,6 +1233,7 @@ accum_pixel static_per_pixel_ps(
 {
 #ifdef ACCUM_PIXEL_HAS_MV
 	g_motion_vector_passthrough.xy = motion_vector;
+	g_raw_depth_passthrough        = fragment_position.z;
 #endif
 	entry_point_data data;
 	BUILD_ENTRY_POINT_DATA(data);
@@ -1310,6 +1311,7 @@ accum_pixel static_per_vertex_ps(
 {
 #ifdef ACCUM_PIXEL_HAS_MV
 	g_motion_vector_passthrough.xy = motion_vector;
+	g_raw_depth_passthrough        = fragment_position.z;
 #endif
 	entry_point_data data;
 	BUILD_ENTRY_POINT_DATA(data);
@@ -1372,6 +1374,7 @@ accum_pixel static_sh_ps(
 {
 #ifdef ACCUM_PIXEL_HAS_MV
 	g_motion_vector_passthrough.xy = motion_vector;
+	g_raw_depth_passthrough        = fragment_position.z;
 #endif
 	entry_point_data data;
 	BUILD_ENTRY_POINT_DATA(data);
@@ -1454,6 +1457,7 @@ accum_pixel dynamic_light_ps(
 {
 #ifdef ACCUM_PIXEL_HAS_MV
 	g_motion_vector_passthrough.xy = motion_vector;
+	g_raw_depth_passthrough        = fragment_position.z;
 #endif
 	// get blend values
 	float4 blend= sample_blend_normalized(texcoord);
@@ -1631,6 +1635,7 @@ accum_pixel lightmap_debug_mode_ps(
 {
 #ifdef ACCUM_PIXEL_HAS_MV
 	g_motion_vector_passthrough.xy = motion_vector;
+	g_raw_depth_passthrough        = fragment_position.z;
 #endif
 	float4 out_color;
 
