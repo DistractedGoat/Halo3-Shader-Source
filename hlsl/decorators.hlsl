@@ -13,11 +13,11 @@
 #define LDR_ALPHA_ADJUST g_exposure.w
 #define HDR_ALPHA_ADJUST g_exposure.b
 #define DARK_COLOR_MULTIPLIER g_exposure.g
-// Decorators render in the albedo pass (RT0+RT1 only). fxc compacts SV_Target3→o2 when SV_Target2
-// is absent, so ShaderRegexDepthCapture (pattern: dcl_output o3) never matches, and rawDepth
-// accidentally matches ShaderRegexBindMVRT (dcl_output o2) → corrupts ResourceMotionVectors.
-// Suppress depth output entirely: no depth capture for decorators, AO=1.0 at foliage pixels (acceptable).
-#define NO_DEPTH_OUTPUT
+// Gap filler approach: fxc compacts SV_Target outputs when there are gaps, so SV_Target3 alone
+// (without SV_Target2) would compile to o2, matching ShaderRegexBindMVRT instead of DepthCapture.
+// _mv_gap at SV_Target2 holds the slot so rawDepth stays at SV_Target3 (o3).
+// ShaderRegexBindMVRT (dcl_output o2) binds RT2=MV (receives zeros — correct, no motion), RT3=Depth.
+// ShaderRegexDepthCapture (dcl_output o3) also matches and binds RT3=Depth (redundant, harmless).
 #include "render_target.fx"
 #include "albedo_pass.fx"
 
@@ -327,6 +327,7 @@ struct decorator_pixel
 	float4 albedo_specmask : SV_Target0;
 	float4 normal          : SV_Target1;
 #ifdef ACCUM_PIXEL_HAS_DEPTH
+	float4 _mv_gap         : SV_Target2;  // gap filler — prevents fxc from compacting SV_Target3→o2
 	float  rawDepth        : SV_Target3;
 #endif
 };
@@ -379,6 +380,7 @@ default_ps(
 	pix.albedo_specmask = base.albedo_specmask;
 	pix.normal          = base.normal;
 #ifdef ACCUM_PIXEL_HAS_DEPTH
+	pix._mv_gap         = 0;
 	pix.rawDepth        = screen_position.z;
 #endif
 	return pix;

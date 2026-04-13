@@ -157,7 +157,7 @@ float4 default_ps(SCREEN_POSITION_INPUT(screen_position), in float2 texcoord :TE
 		float3 gi_color = gi_reproj.rgb;
 
 		// Strength scalar applied first, before any fading
-		float ssgi_strength = 3.0f;   // indirect brightness scalar
+		float ssgi_strength = 7.5f;   // indirect brightness scalar
 		gi_color *= ssgi_strength;
 
 		// viewZ from SSGI buffer .a — used only for fog fade distance.
@@ -180,9 +180,9 @@ float4 default_ps(SCREEN_POSITION_INPUT(screen_position), in float2 texcoord :TE
 		// albedoDetail: preserves local texture variation (albedo normalized to its own luminance).
 		//   Soft normalization: albedo / (albedoLum + 0.1) keeps near-black from exploding.
 		//   Clamped to [0.3..2.0]: no texel contributes more than 2x or less than 0.3x average.
-		float ssgi_receiver_power = 0.5f;  // <1=compressed (sqrt-like), 1=linear, >1=strong hotspot
-		float ssgi_receiver_floor = 0.2f;  // minimum GI contribution on fully dark surfaces (0=none)
-		float ssgi_detail_blend  = 0.5f;   // 0=no texture detail, 1=full albedo detail modulation
+		float ssgi_receiver_power = 1.3f;  // <1=compressed (sqrt-like), 1=linear, >1=strong hotspot
+		float ssgi_receiver_floor = 0.09f;  // minimum GI contribution on fully dark surfaces (0=none)
+		float ssgi_detail_blend  = 0.66f;   // 0=no texture detail, 1=full albedo detail modulation
 		float receiverLum = dot(combined.rgb, float3(0.2126f, 0.7152f, 0.0722f));
 		float receiverWeight = lerp(ssgi_receiver_floor, 1.0f, pow(saturate(receiverLum * 4.0f), ssgi_receiver_power));
 		// albedo_texture (t16) persists from shadow_apply as a stale SRV — same mechanism as
@@ -238,7 +238,7 @@ float4 default_ps(SCREEN_POSITION_INPUT(screen_position), in float2 texcoord :TE
    result.rgb = lerp(cg0, cg1, cg_blend_factor.x);
 
 	// Saturation boost — compensates for SSGI indirect diffuse washing out colors slightly
-	float sat_boost = 1.3f;  // 1.0=neutral, >1=more saturated, tune to taste
+	float sat_boost = 1.1f;  // 1.0=neutral, >1=more saturated, tune to taste
 	float sat_luma = dot(result.rgb, float3(0.2126f, 0.7152f, 0.0722f));
 	result.rgb = lerp(sat_luma.xxx, result.rgb, sat_boost);
 
