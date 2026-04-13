@@ -37,9 +37,9 @@ LOCAL_SAMPLER_2D(mv_buffer, 12);
 // float4(.rgb=GI indirect color, .a=viewZ) from dedicated 15m-radius SSGI pass
 LOCAL_SAMPLER_2D(ssgi_buffer, 15);
 
-// Depth snapshot debug (bound by 3DMigoto at ps-t14 when z==1 / F6 toggle)
-// R32_FLOAT reverse-Z depth; 0=sky/unbound. Unbound → all zeros → no-op.
-Texture2D<float> depth_snapshot_debug : register(t14);
+// SSR debug overlay (bound by 3DMigoto at ps-t14 when z==1 / F3 toggle)
+// RGBA16_FLOAT: .rgb=SSR color (pre-exposure HDR), .a=confidence. Unbound → all zeros → no-op.
+Texture2D<float4> ssr_debug_overlay : register(t14);
 
 // SSR removed from final_composite — now injected per-surface (water_shading.fx etc.)
 
@@ -258,24 +258,16 @@ float4 default_ps(SCREEN_POSITION_INPUT(screen_position), in float2 texcoord :TE
 	// 	result.a = 1.0f;
 	// }
 
-	// === Depth snapshot debug (F6 / z-toggle) ===
-	// Bind ResourceDepthSnapshot to ps-t14 via d3dx.ini [KeyDebugDepthSnapshot] to activate.
-	// When ps-t14 is unbound, depth_snapshot_debug.Load() returns 0 for all pixels → no-op.
-	// When bound: geometry pixels show a log-remapped heat gradient (near=red, mid=green, far=blue).
-	//             Sky/water pixels (rawDbg==0) pass through unchanged — they visually identify themselves.
-	// Log range: near ~0.1m → t≈0, far ~100m → t≈1. Tweak log2(101.0) to change far scale.
+	// === SSR debug overlay (F3 / z-toggle) ===
+	// Bind ResourceSSRFinal to ps-t14 via d3dx.ini [KeyDebugSSR] to activate.
+	// When ps-t14 is unbound, Load() returns (0,0,0,0) → confidence == 0 → no-op.
+	// When bound: pixels with SSR hits show SSR color; pixels with no hit (confidence==0) pass through.
+	// SSR color is pre-exposure HDR — divide by exposure to bring to display-linear before output.
 	{
-		float rawDbg = depth_snapshot_debug.Load(int3(int2(texcoord * float2(1920.0f, 1080.0f)), 0));
-		if (rawDbg > 0.00001f)
+		float4 ssrDbg = ssr_debug_overlay.Load(int3(int2(texcoord * float2(1920.0f, 1080.0f)), 0));
+		if (ssrDbg.a > 0.001f)
 		{
-			float viewZ = 0.00781f / rawDbg;
-			float t = saturate(log2(viewZ + 1.0f) / log2(101.0f));  // [~0m..100m] → [0..1]
-			// heat: near=red(1,0,0), mid=green(0,1,0), far=blue(0,0,1)
-			result.rgb = float3(
-				saturate(1.0f - t * 2.0f),
-				saturate(1.0f - abs(t - 0.5f) * 4.0f),
-				saturate((t - 0.5f) * 2.0f)
-			);
+			result.rgb = ssrDbg.rgb / max(g_exposure.r, 1e-4f);
 			result.a = 1.0f;
 		}
 	}

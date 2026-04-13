@@ -95,7 +95,7 @@ void calc_material_foliage_ps(
 	diffuse_radiance= simple_light_diffuse_light + diffuse_radiance;
 	specular_radiance= 0.0f;
 	
-	envmap_specular_reflectance_and_roughness= float4(1.0f, 1.0f, 1.0f, 0.0f);
+	envmap_specular_reflectance_and_roughness= float4(1.0f, 1.0f, 1.0f, 1.0f);  // roughness 1.0 = fully diffuse (was 0.0=mirror, incorrect for foliage)
 	envmap_area_specular_only= 0.282094815f * sh_lighting_coefficients[0].xyz;
 
 		

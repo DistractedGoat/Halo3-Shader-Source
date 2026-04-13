@@ -86,6 +86,12 @@ void calc_weathering_snow_dust_ps()
 {
 }
 
+#ifdef ENABLE_SSR
+// Bound to ps-t19 by ShaderRegexBindSSR at runtime (matches dcl_output o4 — roughness output slot).
+// Exposes ResourceSSRFinal to the glass reflection pass for SSR blend.
+Texture2D<float4> ssr_buffer_glass : register(t19);
+#endif
+
 void albedo_vs(
 	in vertex_type vertex,
 	out float4 position : SV_Position,
@@ -242,7 +248,15 @@ accum_pixel static_sh_ps(
 	float3 nromal_dir= normal;
 	float3 reflect_dir= normalize( (dot(view_dir, nromal_dir) * nromal_dir - view_dir) * 2 + view_dir );
 	float3 reflection= calc_reflection_ps(view_dir, nromal_dir, reflect_dir);
-	float4 out_color= float4(reflection, 0.0f);		
+#ifdef ENABLE_SSR
+	{
+		float4 ssr_glass = ssr_buffer_glass.Load(int3(int2(fragment_position.xy), 0));
+		float3 ssr_raw = ssr_glass.rgb / max(g_exposure.r, 1e-4f);
+		reflection = lerp(reflection, ssr_raw, saturate(ssr_glass.a));
+		g_roughness_passthrough = 0.05f;  // glass: near-mirror → high SSR confidence in trace
+	}
+#endif
+	float4 out_color= float4(reflection, 0.0f);
 	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(out_color, true, false);
 }
 

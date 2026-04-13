@@ -91,7 +91,7 @@ void calc_material_diffuse_only_ps(
 	}
 
 	specular_radiance= 0.0f;
-	envmap_specular_reflectance_and_roughness= float4(1.0f, 1.0f, 1.0f, 0.0f);
+	envmap_specular_reflectance_and_roughness= float4(1.0f, 1.0f, 1.0f, 0.95f);  // roughness 0.95 = very rough diffuse (was 0.0=mirror, incorrect for diffuse-only)
 	envmap_area_specular_only= 0.282094815f * sh_lighting_coefficients[0].xyz;
 	
 }

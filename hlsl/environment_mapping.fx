@@ -20,6 +20,53 @@ PARAM(float3, env_topcoat_color);
 PARAM(float, env_topcoat_bias);
 PARAM(float, env_roughness_scale);
 
+// halo3-ng SSR injection — ResourceSSRFinal bound to t19 by ShaderRegexBindSSR at runtime.
+// g_ssr_screen_uv set by entry_points.fx (and glass.fx) immediately before CALC_ENVMAP() call.
+#ifdef ENABLE_SSR
+static float2 g_ssr_screen_uv = float2(0.0f, 0.0f);
+Texture2D<float4> ssr_buffer : register(t19);
+
+// Returns ResourceSSRFinal sample: .rgb = HDR reflected scene color (pre-multiplied by g_exposure),
+// .a = blend confidence [0..1] (0 = no hit / full miss, 1 = reliable hit).
+float4 get_ssr(float2 screen_uv, float3 normal)
+{
+    return ssr_buffer.Load(int3(int2(screen_uv * float2(1920.0f, 1080.0f)), 0));
+}
+
+// Physically-based SSR blend — replaces or augments the cubemap reflection.
+//
+// Why this approach vs the old lerp:
+//   Old: lerp(env_color, ssr_raw * spec * low_freq_light * tint, confidence)
+//        low_freq_light is a baked SH lighting term used to bring static cubemaps into
+//        the current lighting environment. SSR samples the LIVE HDR scene — already lit.
+//        Multiplying by low_freq_light double-attenuates SSR in shadowed/interior areas.
+//        env_tint_color is an artist cubemap tweak with no meaning for real reflected radiance.
+//
+//   New: lerp(env_color, ssr_raw * spec, fresnel_weighted_confidence)
+//        - Only F0 tint (spec.xyz) — physically correct spectral tint of the reflection
+//        - Schlick Fresnel multiplies confidence: no boost when no hit (ibr.a=0), maximum
+//          boost at grazing angles where surfaces are physically most reflective
+//        - ssr_strength: per-variant scalar to compensate for HDR cubemap scale differences
+//          (dynamic/custom_map decode via alpha*256; per_pixel/flat use linear alpha ~1)
+float3 apply_ssr_blend(
+    float3  env_color,
+    float3  view_dir,
+    float3  normal,
+    float4  specular_reflectance_and_roughness,
+    float4  ibr,
+    float   ssr_strength)
+{
+    float3 ssr_raw    = ibr.rgb / max(g_exposure.r, 1e-4f);
+    float  F0         = dot(specular_reflectance_and_roughness.xyz, float3(0.2126f, 0.7152f, 0.0722f));
+    float  ndotv      = saturate(abs(dot(view_dir, normal)));
+    float  fresnel    = F0 + (1.0f - F0) * pow(1.0f - ndotv, 5.0f);
+    // Scale confidence by Fresnel: zero when no hit, boosted at grazing angles
+    float  blendWeight = saturate(ibr.a * (1.0f + fresnel * 2.0f));
+    float3 ssr_tinted  = ssr_raw * specular_reflectance_and_roughness.xyz * ssr_strength;
+    return lerp(env_color, ssr_tinted, blendWeight);
+}
+#endif
+
 #if ENVMAP_TYPE(envmap_type) == ENVMAP_TYPE_none
 float3 calc_environment_map_none_ps(
 	in float3 view_dir,
@@ -53,7 +100,11 @@ float3 calc_environment_map_per_pixel_ps(
 #else
 	reflection= sampleCUBElod(environment_map, reflect_dir, 0.0f);
 #endif
-	return reflection.rgb * specular_reflectance_and_roughness.xyz * low_frequency_specular_color * env_tint_color * reflection.a;
+	float3 env_color_pp = reflection.rgb * specular_reflectance_and_roughness.xyz * low_frequency_specular_color * env_tint_color * reflection.a;
+#ifdef USE_SSR
+	env_color_pp = apply_ssr_blend(env_color_pp, view_dir, normal, specular_reflectance_and_roughness, get_ssr(g_ssr_screen_uv, normal), 1.0f);
+#endif
+	return env_color_pp;
 }
 #endif // ENVMAP_TYPE_per_pixel
 
@@ -102,8 +153,11 @@ float3 calc_environment_map_dynamic_ps(
 
 	float3 reflection=  (reflection_0.rgb * reflection_0.a * 256) * dynamic_environment_blend.rgb + 
 						(reflection_1.rgb * reflection_1.a * 256) * (1.0f-dynamic_environment_blend.rgb);
-	return reflection * specular_reflectance_and_roughness.xyz * env_tint_color * low_frequency_specular_color;
-	
+	float3 env_color_dyn = reflection * specular_reflectance_and_roughness.xyz * env_tint_color * low_frequency_specular_color;
+#ifdef USE_SSR
+	env_color_dyn = apply_ssr_blend(env_color_dyn, view_dir, normal, specular_reflectance_and_roughness, get_ssr(g_ssr_screen_uv, normal), 4.0f);
+#endif
+	return env_color_dyn;
 //	return float3(lod, lod, lod) / 6.0f;
 }
 #endif // ENVMAP_TYPE_dynamic
@@ -198,7 +252,11 @@ float3 calc_environment_map_from_flat_texture_ps(
 		reflection= sample2D(flat_environment_map, texcoord.xy / texcoord.z);
 	}
 */
-	return reflection * specular_reflectance_and_roughness.xyz * env_tint_color;
+	float3 env_color_flat = reflection * specular_reflectance_and_roughness.xyz * env_tint_color;
+#ifdef USE_SSR
+	env_color_flat = apply_ssr_blend(env_color_flat, view_dir, normal, specular_reflectance_and_roughness, get_ssr(g_ssr_screen_uv, normal), 1.0f);
+#endif
+	return env_color_flat;
 }
 
 float3 calc_environment_map_from_flat_texture_as_cubemap_ps(
@@ -246,12 +304,11 @@ float3 calc_environment_map_custom_map_ps(
 
 	reflection.rgb *= reflection.a * 256.0f;
 
+	float3 env_color_cm = reflection.rgb * specular_reflectance_and_roughness.xyz * low_frequency_specular_color * env_tint_color;
 #ifdef USE_SSR
-	float4 ibr = get_ssr(global_screen_uv, normal);
-	reflection.rgb = lerp(reflection.rgb, ibr.rgb, ibr.a);
+	env_color_cm = apply_ssr_blend(env_color_cm, view_dir, normal, specular_reflectance_and_roughness, get_ssr(g_ssr_screen_uv, normal), 4.0f);
 #endif
-
-	return reflection.rgb * specular_reflectance_and_roughness.xyz * low_frequency_specular_color * env_tint_color;
+	return env_color_cm;
 }
 float3 sample_environment_map_custom_map_ps(in float3 reflect_dir)
 {

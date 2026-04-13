@@ -21,12 +21,22 @@
 #define ACCUM_PIXEL_HAS_DEPTH 1
 #endif
 #endif
+// Roughness output: only when depth is also active (no SV_Target gap → prevents fxc compaction bug).
+// Water (NO_DEPTH_OUTPUT) and displacement (NO_MV_OUTPUT) correctly inherit no roughness output.
+#ifdef ENABLE_SSR
+#ifdef ACCUM_PIXEL_HAS_DEPTH
+#define ACCUM_PIXEL_HAS_ROUGHNESS 1
+#endif
+#endif
 
 #ifdef ACCUM_PIXEL_HAS_MV
 static float4 g_motion_vector_passthrough = float4(0, 0, 0.333, 0.333);
 #endif
 #ifdef ACCUM_PIXEL_HAS_DEPTH
 static float  g_raw_depth_passthrough     = 0.0f;  // raw reverse-Z depth (SV_Position.z), written to SV_Target3
+#endif
+#ifdef ACCUM_PIXEL_HAS_ROUGHNESS
+static float  g_roughness_passthrough     = 0.95f; // PBR roughness [0=mirror, 1=diffuse]; default diffuse-like
 #endif
 
 // our output format
@@ -47,6 +57,9 @@ struct accum_pixel
    #endif
    #ifdef ACCUM_PIXEL_HAS_DEPTH
 	   float  rawDepth      : SV_Target3;	// raw reverse-Z depth (SV_Position.z) -> render target 3 (halo3-ng)
+   #endif
+   #ifdef ACCUM_PIXEL_HAS_ROUGHNESS
+	   float  roughness     : SV_Target4;	// PBR roughness [0..1] -> render target 4 (halo3-ng SSR)
    #endif
 #endif
 };
@@ -97,6 +110,9 @@ struct accum_pixel
 #endif
 #ifdef ACCUM_PIXEL_HAS_DEPTH
 	result.rawDepth      = g_raw_depth_passthrough;
+#endif
+#ifdef ACCUM_PIXEL_HAS_ROUGHNESS
+	result.roughness     = g_roughness_passthrough;
 #endif
 
 	return result;
