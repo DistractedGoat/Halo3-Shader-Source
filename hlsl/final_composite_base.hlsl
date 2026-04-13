@@ -26,58 +26,22 @@ LOCAL_SAMPLER_2D_IN_VIEWPORT_MAYBE(blur_grade_sampler, 5);		// weapon zoom
 LOCAL_SAMPLER_3D(color_grading0, 6);
 LOCAL_SAMPLER_3D(color_grading1, 7);
 
-// AO + fog fade (bound by 3DMigoto at runtime, safe fallback if unbound)
+// AO buffer (bound by 3DMigoto at runtime, safe fallback if unbound)
 LOCAL_SAMPLER_2D(ao_buffer, 10);
-LOCAL_SAMPLER_2D(ao_depth_buffer, 11);
 
-// Motion vectors for AO display-time reproject (bound by 3DMigoto, always when AO on)
+// Motion vector buffer — .ba channels = SH chromaticity tint (rg channels unused after Layer 2 removal)
 LOCAL_SAMPLER_2D(mv_buffer, 12);
-
-// Previous frame VP matrix as 4x1 texture (bound by 3DMigoto for camera MV fallback)
-LOCAL_SAMPLER_2D(prev_vp_texture, 13);
 
 
 // SSGI GI color buffer (bound by 3DMigoto at ps-t15 when y==1 / F12 toggle)
 // float4(.rgb=GI indirect color, .a=viewZ) from dedicated 15m-radius SSGI pass
 LOCAL_SAMPLER_2D(ssgi_buffer, 15);
 
+// Depth snapshot debug (bound by 3DMigoto at ps-t14 when z==1 / F6 toggle)
+// R32_FLOAT reverse-Z depth; 0=sky/unbound. Unbound → all zeros → no-op.
+Texture2D<float> depth_snapshot_debug : register(t14);
+
 // SSR removed from final_composite — now injected per-surface (water_shading.fx etc.)
-
-// --- 4x4 matrix inverse (adjugate / determinant) ---
-float4x4 inverse4x4(float4x4 m)
-{
-	float n11 = m[0][0], n12 = m[0][1], n13 = m[0][2], n14 = m[0][3];
-	float n21 = m[1][0], n22 = m[1][1], n23 = m[1][2], n24 = m[1][3];
-	float n31 = m[2][0], n32 = m[2][1], n33 = m[2][2], n34 = m[2][3];
-	float n41 = m[3][0], n42 = m[3][1], n43 = m[3][2], n44 = m[3][3];
-
-	float t11 = n23*n34*n42 - n24*n33*n42 + n24*n32*n43 - n22*n34*n43 - n23*n32*n44 + n22*n33*n44;
-	float t12 = n14*n33*n42 - n13*n34*n42 - n14*n32*n43 + n12*n34*n43 + n13*n32*n44 - n12*n33*n44;
-	float t13 = n13*n24*n42 - n14*n23*n42 + n14*n22*n43 - n12*n24*n43 - n13*n22*n44 + n12*n23*n44;
-	float t14 = n14*n23*n32 - n13*n24*n32 - n14*n22*n33 + n12*n24*n33 + n13*n22*n34 - n12*n23*n34;
-
-	float det = n11*t11 + n21*t12 + n31*t13 + n41*t14;
-	float invDet = 1.0f / det;
-
-	float4x4 r;
-	r[0][0] = t11 * invDet;
-	r[0][1] = t12 * invDet;
-	r[0][2] = t13 * invDet;
-	r[0][3] = t14 * invDet;
-	r[1][0] = (n24*n33*n41 - n23*n34*n41 - n24*n31*n43 + n21*n34*n43 + n23*n31*n44 - n21*n33*n44) * invDet;
-	r[1][1] = (n13*n34*n41 - n14*n33*n41 + n14*n31*n43 - n11*n34*n43 - n13*n31*n44 + n11*n33*n44) * invDet;
-	r[1][2] = (n14*n23*n41 - n13*n24*n41 - n14*n21*n43 + n11*n24*n43 + n13*n21*n44 - n11*n23*n44) * invDet;
-	r[1][3] = (n13*n24*n31 - n14*n23*n31 + n14*n21*n33 - n11*n24*n33 - n13*n21*n34 + n11*n23*n34) * invDet;
-	r[2][0] = (n22*n34*n41 - n24*n32*n41 + n24*n31*n42 - n21*n34*n42 - n22*n31*n44 + n21*n32*n44) * invDet;
-	r[2][1] = (n14*n32*n41 - n12*n34*n41 - n14*n31*n42 + n11*n34*n42 + n12*n31*n44 - n11*n32*n44) * invDet;
-	r[2][2] = (n12*n24*n41 - n14*n22*n41 + n14*n21*n42 - n11*n24*n42 - n12*n21*n44 + n11*n22*n44) * invDet;
-	r[2][3] = (n14*n22*n31 - n12*n24*n31 - n14*n21*n32 + n11*n24*n32 + n12*n21*n34 - n11*n22*n34) * invDet;
-	r[3][0] = (n23*n32*n41 - n22*n33*n41 - n23*n31*n42 + n21*n33*n42 + n22*n31*n43 - n21*n32*n43) * invDet;
-	r[3][1] = (n12*n33*n41 - n13*n32*n41 + n13*n31*n42 - n11*n33*n42 - n12*n31*n43 + n11*n32*n43) * invDet;
-	r[3][2] = (n13*n22*n41 - n12*n23*n41 - n13*n21*n42 + n11*n23*n42 + n12*n21*n43 - n11*n22*n43) * invDet;
-	r[3][3] = (n12*n23*n31 - n13*n22*n31 + n13*n21*n32 - n11*n23*n32 - n12*n21*n33 + n11*n22*n33) * invDet;
-	return r;
-}
 
 // define default functions, if they haven't been already
 
@@ -157,56 +121,16 @@ float4 default_ps(SCREEN_POSITION_INPUT(screen_position), in float2 texcoord :TE
 	// final composite
 	float4 combined= COMBINE_HDR_LDR(texcoord);									// sample and blend full resolution render targets
 
-	// === AO with MV reproject + camera fallback + weapon exclusion ===
-	// AO buffer is from previous [Present]; MVs are from current forward pass
-	float depth_val = sample2D(ao_depth_buffer, texcoord).r;
-	float2 mv_ao = sample2D(mv_buffer, texcoord).rg;
+	// === AO — current-frame, no reprojection needed (compute runs pre-draw, zero lag) ===
+	// ao_buffer carries float4(ao, ao, ao, viewZ) from GTAO pass.
+	// .a = viewZ: real-surface flag (0 for sky/water) + fog distance.
+	float4 ao_sample = sample2D(ao_buffer, texcoord);
+	float ao = (ao_sample.a > 0.001f) ? saturate(ao_sample.r) : 1.0f;	// sky/water/unbound → ao=1.0
 
-	// Camera-derived MV fallback for non-MV pixels (decorators, uncovered geometry)
-	// Uses ViewVS CB (View_Projection) — same registration as AtmosphereVS
-	if (mv_ao.x == 0.0f && mv_ao.y == 0.0f && depth_val > 0.0f)
+	float ao_viewZ = ao_sample.a;  // viewZ from GTAO output; 0 for sky/water (same sentinel)
+	if (ao_viewZ > 0.001f && ao < 1.0f)
 	{
-		float z_view_fallback = 0.00781f / max(depth_val, 0.000001f);
-		if (z_view_fallback < 500.0f)  // skip sky
-		{
-			float2 ndc = float2(texcoord.x * 2.0f - 1.0f, 1.0f - texcoord.y * 2.0f);
-			float4x4 invVP = inverse4x4(View_Projection);
-			float4 worldH = mul(float4(ndc, depth_val, 1.0f), invVP);
-			float3 worldPos = worldH.xyz / worldH.w;
-
-			// Load previous VP from 4x1 texture (texel centers at 0.125, 0.375, 0.625, 0.875)
-			float4x4 prevVP = float4x4(
-				sample2D(prev_vp_texture, float2(0.125f, 0.5f)),
-				sample2D(prev_vp_texture, float2(0.375f, 0.5f)),
-				sample2D(prev_vp_texture, float2(0.625f, 0.5f)),
-				sample2D(prev_vp_texture, float2(0.875f, 0.5f))
-			);
-
-			// First-frame safety: skip if prev VP not yet written
-			if (prevVP[0].x != 0.0f || prevVP[0].y != 0.0f || prevVP[0].z != 0.0f || prevVP[0].w != 0.0f)
-			{
-				float4 prevClip = mul(float4(worldPos, 1.0f), prevVP);
-				float2 prevNDC = prevClip.xy / prevClip.w;
-				mv_ao = (ndc - prevNDC) * float2(0.5f, -0.5f);
-			}
-		}
-	}
-
-	// Weapon depth exclusion: fade out MV reproject for near-camera geometry
-	// Weapons are camera-locked, so AO doesn't need reprojection (same relative position)
-	// Per-vertex MVs on weapons are wrong (double-count camera motion due to world_pos shift)
-	float z_view_reproject = 0.00781f / max(depth_val, 0.000001f);
-	float reproject_weight = smoothstep(1.5f, 3.0f, z_view_reproject);
-	float2 ao_uv = texcoord - mv_ao * reproject_weight;
-
-	// ao_buffer carries float4(ao, ao, ao, viewZ) from GTAO pass
-	// .a = viewZ serves as real-surface flag: 0 for sky/unbound → fallback ao=1.0
-	float4 ao_sample = sample2D(ao_buffer, ao_uv);
-	float ao = (ao_sample.a > 0.001f) ? saturate(ao_sample.r) : 1.0f;	// safe: unbound/sky/water → ao=1.0
-
-	if (depth_val > 0.0f && ao < 1.0f)
-	{
-		float z_view = 0.00781f / max(depth_val, 0.000001f);
+		float z_view = ao_viewZ;
 		float dist = min(max(z_view + v_atmosphere_constant_0.w, 0.0f), v_atmosphere_constant_1.w);
 		float3 extinction = exp2(-(v_atmosphere_constant_2.xyz + v_atmosphere_constant_3.xyz) * dist);
 		float fog = 1.0f - dot(extinction, float3(0.333f, 0.333f, 0.333f));
@@ -225,12 +149,11 @@ float4 default_ps(SCREEN_POSITION_INPUT(screen_position), in float2 texcoord :TE
 	ao_tint = lerp(float3(0.333, 0.333, 0.333), ao_tint, ao_color_saturation);
 	ao_tint = ao_tint / max(dot(ao_tint, float3(1, 1, 1)), 0.001);
 
-	// === SSGI indirect diffuse with display-time reprojection ===
+	// === SSGI indirect diffuse — current-frame, no reprojection needed ===
 	// Added BEFORE AO multiply so AO applies uniformly to direct+indirect — preserves AO contrast.
 	{
-		// Reuse AO's reprojected UV (mv_ao + weapon fade already computed above)
 		// ssgi_buffer = dedicated 15m-radius GI pass, float4(.rgb=GI, .a=viewZ)
-		float4 gi_reproj = sample2D(ssgi_buffer, saturate(texcoord - mv_ao * reproject_weight));
+		float4 gi_reproj = sample2D(ssgi_buffer, texcoord);
 		float3 gi_color = gi_reproj.rgb;
 
 		// Strength scalar applied first, before any fading
@@ -238,11 +161,9 @@ float4 default_ps(SCREEN_POSITION_INPUT(screen_position), in float2 texcoord :TE
 		gi_color *= ssgi_strength;
 
 		// viewZ from SSGI buffer .a — used only for fog fade distance.
-		// NOTE: do NOT gate the GI add on this value. It's 1-frame stale at texcoord (non-reprojected),
-		// so after camera movement it may show sky sentinel (0) for pixels that now have real geometry,
-		// which would suppress GI on freshly-visible scene pixels. True sky pixels are safe regardless
+		// NOTE: do NOT gate the GI add on this value. True sky pixels are safe regardless
 		// because the SSGI trace writes gi_color=(0,0,0) for sky, making the add a no-op.
-		float z_view_gi = sample2D(ssgi_buffer, texcoord).a;
+		float z_view_gi = gi_reproj.a;
 
 		// Atmospheric fade — only meaningful for scene pixels (z_view_gi > 0)
 		if (z_view_gi > 0.001f)
@@ -336,6 +257,28 @@ float4 default_ps(SCREEN_POSITION_INPUT(screen_position), in float2 texcoord :TE
 	// 	);
 	// 	result.a = 1.0f;
 	// }
+
+	// === Depth snapshot debug (F6 / z-toggle) ===
+	// Bind ResourceDepthSnapshot to ps-t14 via d3dx.ini [KeyDebugDepthSnapshot] to activate.
+	// When ps-t14 is unbound, depth_snapshot_debug.Load() returns 0 for all pixels → no-op.
+	// When bound: geometry pixels show a log-remapped heat gradient (near=red, mid=green, far=blue).
+	//             Sky/water pixels (rawDbg==0) pass through unchanged — they visually identify themselves.
+	// Log range: near ~0.1m → t≈0, far ~100m → t≈1. Tweak log2(101.0) to change far scale.
+	{
+		float rawDbg = depth_snapshot_debug.Load(int3(int2(texcoord * float2(1920.0f, 1080.0f)), 0));
+		if (rawDbg > 0.00001f)
+		{
+			float viewZ = 0.00781f / rawDbg;
+			float t = saturate(log2(viewZ + 1.0f) / log2(101.0f));  // [~0m..100m] → [0..1]
+			// heat: near=red(1,0,0), mid=green(0,1,0), far=blue(0,0,1)
+			result.rgb = float3(
+				saturate(1.0f - t * 2.0f),
+				saturate(1.0f - abs(t - 0.5f) * 4.0f),
+				saturate((t - 0.5f) * 2.0f)
+			);
+			result.a = 1.0f;
+		}
+	}
 
 	return result;
 }

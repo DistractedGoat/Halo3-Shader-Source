@@ -1135,11 +1135,17 @@ s_water_interpolators water_shading_non_tessellation_vs( s_vertex_type_water_sha
 #ifdef PIXEL_SHADER
 accum_pixel water_shading_tessellation_ps(s_water_interpolators INTERPOLATORS)
 {
+#ifdef ACCUM_PIXEL_HAS_DEPTH
+	g_raw_depth_passthrough = INTERPOLATORS.position.z;
+#endif
 	return water_shading(INTERPOLATORS);
 }
 
 accum_pixel water_shading_non_tessellation_ps(s_water_interpolators INTERPOLATORS)
 {
+#ifdef ACCUM_PIXEL_HAS_DEPTH
+	g_raw_depth_passthrough = INTERPOLATORS.position.z;
+#endif
 	return water_shading(INTERPOLATORS);
 }
 #endif //PIXEL_SHADER

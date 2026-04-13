@@ -37,6 +37,13 @@ Copyright (c) Microsoft Corporation, 2005. all rights reserved.
 #ifndef DARK_COLOR_MULTIPLIER
 #define DARK_COLOR_MULTIPLIER g_exposure.g
 #endif
+// Water's software depth test (water_shading.fx:676) executes the PS for terrain-occluded pixels too,
+// then discards via early return. Both paths call convert_to_render_target() which writes g_raw_depth_passthrough
+// to SV_Target3. This means water depth would contaminate terrain pixels in ResourceCurrentDepthCopy,
+// making GTAO think terrain under water is at water-surface depth → too-bright AO halo around water.
+// Suppress RT3 (depth) output entirely for water; water pixels will read as 0 (sky sentinel, AO=1.0).
+// Water has correct hardware Z-test visibility; the AO "miss" on water pixels is acceptable.
+#define NO_DEPTH_OUTPUT
 #include "render_target.fx"
 
 //This comment causes the shader compiler to be invoked for certain types

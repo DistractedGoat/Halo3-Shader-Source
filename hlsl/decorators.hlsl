@@ -13,6 +13,11 @@
 #define LDR_ALPHA_ADJUST g_exposure.w
 #define HDR_ALPHA_ADJUST g_exposure.b
 #define DARK_COLOR_MULTIPLIER g_exposure.g
+// Decorators render in the albedo pass (RT0+RT1 only). fxc compacts SV_Target3→o2 when SV_Target2
+// is absent, so ShaderRegexDepthCapture (pattern: dcl_output o3) never matches, and rawDepth
+// accidentally matches ShaderRegexBindMVRT (dcl_output o2) → corrupts ResourceMotionVectors.
+// Suppress depth output entirely: no depth capture for decorators, AO=1.0 at foliage pixels (acceptable).
+#define NO_DEPTH_OUTPUT
 #include "render_target.fx"
 #include "albedo_pass.fx"
 
@@ -313,8 +318,22 @@ void default_vs(
 //    be careful changing this code.  it is optimized to use very few GPRs + interpolators
 //			current optimized shader:	3 GPRs
 
+// Extends albedo_pixel with SV_Target3 for depth capture.
+// ShaderRegexDepthCapture (pattern: dcl_output o3) binds ResourceCurrentDepthCopy as RT3
+// automatically when this compiled shader has dcl_output o3 — no d3dx.ini hash changes needed.
 #ifdef pc
-albedo_pixel
+struct decorator_pixel
+{
+	float4 albedo_specmask : SV_Target0;
+	float4 normal          : SV_Target1;
+#ifdef ACCUM_PIXEL_HAS_DEPTH
+	float  rawDepth        : SV_Target3;
+#endif
+};
+#endif
+
+#ifdef pc
+decorator_pixel
 #else   
 float4 
 #endif 
@@ -355,8 +374,15 @@ default_ps(
 #endif
 
 #ifdef pc
-	return convert_to_albedo_target(color, normal, position_w);
-#else   
+	albedo_pixel base = convert_to_albedo_target(color, normal, position_w);
+	decorator_pixel pix;
+	pix.albedo_specmask = base.albedo_specmask;
+	pix.normal          = base.normal;
+#ifdef ACCUM_PIXEL_HAS_DEPTH
+	pix.rawDepth        = screen_position.z;
+#endif
+	return pix;
+#else
 	return color;
 #endif // pc
 }

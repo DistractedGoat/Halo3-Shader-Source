@@ -14,8 +14,12 @@
 // Depth capture: active for all forward geometry regardless of ENABLE_MOTION_VECTORS.
 // shadow_apply defines NO_MV_OUTPUT → no depth output (fullscreen quad, not geometry).
 // displacement.hlsl/displacement_motion_blur.hlsl define NO_MV_OUTPUT → prevents near-plane contamination.
+// water.fx defines NO_DEPTH_OUTPUT → excludes water from RT3 (software depth test means water PS
+// executes at terrain-occluded pixels too; writing water depth there corrupts AO for terrain beneath water).
 #ifndef NO_MV_OUTPUT
+#ifndef NO_DEPTH_OUTPUT
 #define ACCUM_PIXEL_HAS_DEPTH 1
+#endif
 #endif
 
 #ifdef ACCUM_PIXEL_HAS_MV
