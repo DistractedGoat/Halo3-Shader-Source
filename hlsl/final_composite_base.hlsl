@@ -122,32 +122,40 @@ float4 default_ps(SCREEN_POSITION_INPUT(screen_position), in float2 texcoord :TE
 	float4 combined= COMBINE_HDR_LDR(texcoord);									// sample and blend full resolution render targets
 
 	// === AO — current-frame, no reprojection needed (compute runs pre-draw, zero lag) ===
-	// ao_buffer carries float4(ao, ao, ao, viewZ) from GTAO pass.
+	// ao_buffer carries float4(bent_nx, bent_ny, ao, viewZ) from GTAO pass.
 	// .a = viewZ: real-surface flag (0 for sky/water) + fog distance.
 	float4 ao_sample = sample2D(ao_buffer, texcoord);
-	float ao = (ao_sample.a > 0.001f) ? saturate(ao_sample.r) : 1.0f;	// sky/water/unbound → ao=1.0
+	float  ao_viewZ  = ao_sample.a;
+	float  ao        = (ao_viewZ > 0.001f) ? saturate(ao_sample.b) : 1.0f;  // sky/water/unbound → ao=1.0
+	float2 bentN_XY  = (ao_viewZ > 0.001f) ? ao_sample.rg : float2(0.0f, 0.0f);
+	float  bentN_Z   = sqrt(max(0.001f, 1.0f - min(dot(bentN_XY, bentN_XY), 1.0f)));
+	// bentNormal is view-space; .xy is in-plane, .z is viewer-facing component (always positive)
 
-	float ao_viewZ = ao_sample.a;  // viewZ from GTAO output; 0 for sky/water (same sentinel)
+	// Multi-bounce colored AO (Patapom 2018 / UE5 LumenScreenSpaceBentNormal)
+	// albedo_texture (t16) persists from shadow_apply as stale SRV — same as SSGI receiver.
+	// Load() returns raw sRGB bytes; square to approximate gamma-2 decode to linear.
+	float3 albedo_ao = albedo_texture.Load(int3(int2(texcoord * float2(1920.0f, 1080.0f)), 0)).rgb;
+	albedo_ao = albedo_ao * albedo_ao;  // sRGB → ~linear (gamma-2 approximation)
+	// Patapom cubic polynomial: max(ao, poly(ao, albedo)) adds indirect bounce energy per channel.
+	// Result: per-channel occlusion — red surfaces stay bright in red, dark surfaces absorb all bounces.
+	// ao passed directly (not squared) — the polynomial already applies the right curve per-channel.
+	float ao_d = ao;
+	float3 aoV = float3(ao_d, ao_d, ao_d);
+	float3 mb_a =  2.0404f * albedo_ao - 0.3324f;
+	float3 mb_b = -4.7951f * albedo_ao + 0.6417f;
+	float3 mb_c =  2.7552f * albedo_ao + 0.6903f;
+	float3 ao_multi = max(aoV, ((aoV * mb_a + mb_b) * aoV + mb_c) * aoV);
+	// ao_multi: per-channel [ao_d..1] — bright albedo channels lose less energy from occlusion
+
+	// Fog fade: attenuate AO per-channel toward 1 at distance
 	if (ao_viewZ > 0.001f && ao < 1.0f)
 	{
-		float z_view = ao_viewZ;
-		float dist = min(max(z_view + v_atmosphere_constant_0.w, 0.0f), v_atmosphere_constant_1.w);
+		float dist = min(max(ao_viewZ + v_atmosphere_constant_0.w, 0.0f), v_atmosphere_constant_1.w);
 		float3 extinction = exp2(-(v_atmosphere_constant_2.xyz + v_atmosphere_constant_3.xyz) * dist);
 		float fog = 1.0f - dot(extinction, float3(0.333f, 0.333f, 0.333f));
-		// ao_fog_scale: higher = AO fades sooner (2.0=default, try 4-8 for heavier fog scenes)
 		float ao_fog_scale = 7.0f;
-		ao = lerp(ao, 1.0f, saturate(fog * ao_fog_scale));
+		ao_multi = lerp(ao_multi, float3(1.0f, 1.0f, 1.0f), saturate(fog * ao_fog_scale));
 	}
-
-	// SH chromaticity tinted AO — ambient color from lightmap L0 DC
-	float2 sh_chroma_rg = sample2D(mv_buffer, texcoord).ba;
-	float3 ao_tint = float3(sh_chroma_rg.x, sh_chroma_rg.y, 1.0 - sh_chroma_rg.x - sh_chroma_rg.y);
-	ao_tint = ao_tint / max(dot(ao_tint, float3(1, 1, 1)), 0.001);
-
-	// Tuning: 0=monochrome AO, 1=full chromaticity tint
-	float ao_color_saturation = 0.5;
-	ao_tint = lerp(float3(0.333, 0.333, 0.333), ao_tint, ao_color_saturation);
-	ao_tint = ao_tint / max(dot(ao_tint, float3(1, 1, 1)), 0.001);
 
 	// === SSGI indirect diffuse — current-frame, no reprojection needed ===
 	// Added BEFORE AO multiply so AO applies uniformly to direct+indirect — preserves AO contrast.
@@ -196,14 +204,61 @@ float4 default_ps(SCREEN_POSITION_INPUT(screen_position), in float2 texcoord :TE
 	// === end SSGI ===
 
 	// AO applied AFTER SSGI — darkens direct+indirect uniformly so AO contrast is unaffected by SSGI.
-	// ao=1 → white (no effect); ao<1 → tinted toward ambient color
-	float ao_scene_power    = 2.0f;    // >1 darkens AO contrast (pow curve on ao value)
-	float ao_scene_strength = 1.0f;    // 0=no AO darkening, 1=full scene darkening
-	float ao_dark_floor     = 0.01f;    // 0=fully black at max occlusion, 0.333=original tint floor, tune between
-	float ao_darkened = pow(ao, ao_scene_power);
-	float3 ao_color = lerp(ao_tint * ao_dark_floor, float3(1, 1, 1), ao_darkened);
-	combined.rgb *= lerp(float3(1, 1, 1), ao_color, ao_scene_strength);
+	// Multi-bounce per-channel: red surfaces keep reddish tint in cavities, dark surfaces go black.
+	float ao_scene_strength = 1.0f;   // 0=no AO darkening, 1=full scene darkening
+	float ao_dark_floor     = 0.01f;  // minimum per-channel brightness at max occlusion
+	float3 ao_color = lerp(float3(ao_dark_floor, ao_dark_floor, ao_dark_floor), float3(1.0f, 1.0f, 1.0f), ao_multi);
+	combined.rgb *= lerp(float3(1.0f, 1.0f, 1.0f), ao_color, ao_scene_strength);
 	// === end AO ===
+
+	// ============================================================================
+	// PHASE 2 — Specular Occlusion (NOT YET IMPLEMENTED — design notes follow)
+	// ============================================================================
+	//
+	// Goal: Use bent normal to gate SSR confidence, removing reflections from
+	// geometrically occluded cavities (corners, crevices, under overhangs).
+	//
+	// Algorithm: cone-cone intersection (Jimenez 2016 / UE5 SpecularOcclusion)
+	//   - "Unoccluded cone" centered on bentNormal, half-angle = FastACos(ao)
+	//   - "Reflection cone" centered on reflDir, half-angle = roughness * HALF_PI
+	//   - specOcc = 1 if cones overlap, 0 if reflection dir is fully occluded
+	//
+	// Implementation (when ready):
+	//   1. Bind ResourceRoughness → ps-t11 in [ShaderOverrideColorGrading] / [KeyDebugSSR]
+	//      (roughness MRT requires SV_Target3 at render_target.fx — currently used by rawDepth)
+	//
+	//   2. Add to this file:
+	//      Texture2D<float> roughness_buffer : register(t11);
+	//      float roughness = roughness_buffer.Load(int3(int2(texcoord * float2(1920.0f, 1080.0f)), 0)).r;
+	//
+	//   3. Reconstruct view-space reflection direction:
+	//      float3 viewDir = normalize(float3(
+	//          g_NDCToViewMul * (texcoord * 2.0f - 1.0f) + g_NDCToViewAdd, 1.0f));
+	//      float3 viewN = float3(bentN_XY, bentN_Z);  // already computed above
+	//      float3 reflDir = reflect(-viewDir, viewN);
+	//
+	//   4. Cone-cone intersection:
+	//      float specCone     = roughness * HALF_PI;
+	//      float unoccCone    = FastACos(saturate(ao));
+	//      float cosAngle     = saturate(dot(reflDir, float3(bentN_XY, bentN_Z)));
+	//      float angleBetween = FastACos(cosAngle);
+	//      float specOcc      = saturate(1.0f - smoothstep(
+	//                               max(0.0f, unoccCone - specCone),
+	//                               unoccCone + specCone, angleBetween));
+	//
+	//   5. Apply to SSR debug overlay block below:
+	//      ssrDbg.a *= specOcc;
+	//
+	// BENT NORMAL Y-AXIS BIAS (known limitation for Phase 2):
+	//   GTAO slice phi sweeps [0, PI] in screen space, so sin(phi) >= 0 always.
+	//   The bent normal accumulator (bentAccum += orthoDir * sliceAO) can never
+	//   accumulate a negative Y component. This means ceiling surfaces (whose
+	//   unoccluded hemisphere points upward in screen Y) will have a slightly
+	//   upward-biased bent normal rather than the true downward unoccluded direction.
+	//   Fix (when Phase 2 warrants it): extend phi to [0, 2*PI] and halve g_SliceCount,
+	//   or directly reconstruct the full-hemisphere slice by mirroring the negative-phi
+	//   direction. Not urgent — specular occlusion cone test is tolerant of small bias.
+	// ============================================================================
 
 	// SSR now injected per-surface (water_shading.fx), not here
 
