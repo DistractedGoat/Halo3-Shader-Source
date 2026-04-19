@@ -52,6 +52,12 @@ Texture2D<float> debug_roughness_tex : register(t8);
 // Used by color-band roughness diagnostic to distinguish sky from unwritten geometry.
 Texture2D<float> debug_depth_tex : register(t9);
 
+// Screen-space shadow factor (bound by 3DMigoto at ps-t11 when $s==1 / F5 toggle).
+// float4: .r=shadow [0=fully shadowed, 1=lit]; .g=hitDistance world units (unused at composite);
+//         .b=viewZ sentinel (0=sky/unbound → no darkening); .a=unused.
+// When ps-t11 is unbound, Load() returns (0,0,0,0) → .b==0 → falls back to 1.0 (no shadow applied).
+Texture2D<float4> sss_texture : register(t11);
+
 // SSR removed from final_composite — now injected per-surface (water_shading.fx etc.)
 
 // define default functions, if they haven't been already
@@ -168,8 +174,64 @@ float4 default_ps(SCREEN_POSITION_INPUT(screen_position), in float2 texcoord :TE
 		ao_multi = lerp(ao_multi, float3(1.0f, 1.0f, 1.0f), saturate(fog * ao_fog_scale));
 	}
 
-	// === SSGI indirect diffuse — current-frame, no reprojection needed ===
-	// Added BEFORE AO multiply so AO applies uniformly to direct+indirect — preserves AO contrast.
+	// === Screen-space contact shadows (halo3-ng, F5 / $s toggle) ===
+	// Applied FIRST — direct-light occlusion belongs to the lighting term, before ambient/indirect.
+	// Soft blend: fog-fade with distance, lighting-aware modulation, min-floor to preserve crevice
+	// detail. Atmosphere extinction reuses the same formula as AO/SSGI for visual coherence.
+	// Sky / water / unbound: .b viewZ sentinel == 0 → sss_factor = 1.0 (no darkening).
+	{
+		int2   pix_sss  = int2(texcoord * float2(1920.0f, 1080.0f));
+		float4 sss_data = sss_texture.Load(int3(pix_sss, 0));
+		float  sss_raw  = sss_data.r;
+		float  sss_viewZ = sss_data.b;
+
+		if (sss_viewZ > 0.001f)
+		{
+			// Tunables (hardcoded — match codebase pattern; flip via shader recompile)
+			const float sss_strength  = 1.0f;   // overall multiplier (0=off, 1=full)
+			const float sss_min_floor = 0.12f;  // never crush past this — preserves indirect detail
+			const float sss_fog_scale = 7.0f;   // matches AO/SSGI fog scale
+			const float sss_lum_knee  = 0.005f; // only protect near-pitch-black pixels
+			const float sss_lum_full  = 0.06f;  // most lit surfaces get full strength
+
+			// Atmospheric fade — distant pixels are drowned in scatter, hard contact shadow
+			// at 80m looks wrong. Use the same extinction formula as AO/SSGI.
+			float sss_dist = min(max(sss_viewZ + v_atmosphere_constant_0.w, 0.0f), v_atmosphere_constant_1.w);
+			float3 sss_extinction = exp2(-(v_atmosphere_constant_2.xyz + v_atmosphere_constant_3.xyz) * sss_dist);
+			float  sss_fog = 1.0f - dot(sss_extinction, float3(0.333f, 0.333f, 0.333f));
+			float  fogFade = saturate(1.0f - sss_fog * sss_fog_scale);
+
+			// Lighting-aware: bright direct-lit pixels darken more than already-dark crevices
+			// (avoids "double shadow" stacking on baked shadows from the lightmap).
+			float recvLum    = dot(combined.rgb, float3(0.2126f, 0.7152f, 0.0722f));
+			float lumWeight  = smoothstep(sss_lum_knee, sss_lum_full, recvLum);
+
+			// Final blend: lerp(1, sss_raw, strength) gives base shadow, then floor it,
+			// then scale strength by fog and lighting weight.
+			float strength   = saturate(sss_strength * fogFade * lumWeight);
+			float sss_factor = lerp(1.0f, sss_raw, strength);
+			sss_factor       = max(sss_factor, sss_min_floor);
+
+			combined.rgb *= sss_factor;
+		}
+	}
+	// === end SSS ===
+
+	// === AO multiply — applied AFTER SSS, BEFORE SSGI ===
+	// Order: SSS (direct shadow) → AO (ambient/cavity) → SSGI (bounce light fills the dark).
+	// Multi-bounce per-channel: red surfaces keep reddish tint in cavities, dark surfaces go black.
+	{
+		float ao_scene_strength = 1.0f;   // 0=no AO darkening, 1=full scene darkening
+		float ao_dark_floor     = 0.01f;  // minimum per-channel brightness at max occlusion
+		float3 ao_color = lerp(float3(ao_dark_floor, ao_dark_floor, ao_dark_floor), float3(1.0f, 1.0f, 1.0f), ao_multi);
+		combined.rgb *= lerp(float3(1.0f, 1.0f, 1.0f), ao_color, ao_scene_strength);
+	}
+	// === end AO ===
+
+	// === SSGI indirect diffuse — added LAST so bounce light fills SSS+AO darkened regions ===
+	// Correct lighting model: SSS+AO occlude DIRECT light only; SSGI bounce is added on top.
+	// receiverWeight uses post-shadow `combined` luminance, so SSGI is naturally suppressed in
+	// fully-shadowed regions but the receiver_floor still allows some bounce in deep shadows.
 	{
 		// ssgi_buffer = dedicated 15m-radius GI pass, float4(.rgb=GI, .a=viewZ)
 		float4 gi_reproj = sample2D(ssgi_buffer, texcoord);
@@ -213,14 +275,6 @@ float4 default_ps(SCREEN_POSITION_INPUT(screen_position), in float2 texcoord :TE
 		combined.rgb += gi_color * giReceiver;
 	}
 	// === end SSGI ===
-
-	// AO applied AFTER SSGI — darkens direct+indirect uniformly so AO contrast is unaffected by SSGI.
-	// Multi-bounce per-channel: red surfaces keep reddish tint in cavities, dark surfaces go black.
-	float ao_scene_strength = 1.0f;   // 0=no AO darkening, 1=full scene darkening
-	float ao_dark_floor     = 0.01f;  // minimum per-channel brightness at max occlusion
-	float3 ao_color = lerp(float3(ao_dark_floor, ao_dark_floor, ao_dark_floor), float3(1.0f, 1.0f, 1.0f), ao_multi);
-	combined.rgb *= lerp(float3(1.0f, 1.0f, 1.0f), ao_color, ao_scene_strength);
-	// === end AO ===
 
 	// ============================================================================
 	// PHASE 2 — Specular Occlusion (NOT YET IMPLEMENTED — design notes follow)
