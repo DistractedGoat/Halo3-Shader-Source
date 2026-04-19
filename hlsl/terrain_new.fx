@@ -944,6 +944,15 @@ accum_pixel static_lighting_shared_ps_quadratic(
 	#endif
 
 	out_color.rgb= (out_color.rgb * extinction + inscatter) * g_exposure.rrr;
+#ifdef ACCUM_PIXEL_HAS_ROUGHNESS
+	// Propagate terrain roughness — same approximation already used for CALC_ENVMAP above.
+	// Mirrors terrain.fx lines 1215-1221 which this file was missing.
+	#if SPECULAR_MATERIAL_COUNT > 0
+		g_roughness_passthrough = max(0.01f, 1.01f - specular.power / 200.0f);
+	#else
+		g_roughness_passthrough = 0.75f;	// non-specular terrain: rock/dirt default
+	#endif
+#endif
 	return convert_to_render_target(out_color, true, false);
 }
 
@@ -1108,6 +1117,15 @@ accum_pixel static_lighting_shared_ps_linear_with_dominant_light(
 	#endif
 
 	out_color.rgb= (out_color.rgb * extinction + inscatter) * g_exposure.rrr;
+#ifdef ACCUM_PIXEL_HAS_ROUGHNESS
+	// Propagate terrain roughness — same approximation already used for CALC_ENVMAP above.
+	// Mirrors terrain.fx lines 1215-1221 which this file was missing.
+	#if SPECULAR_MATERIAL_COUNT > 0
+		g_roughness_passthrough = max(0.01f, 1.01f - specular.power / 200.0f);
+	#else
+		g_roughness_passthrough = 0.75f;	// non-specular terrain: rock/dirt default
+	#endif
+#endif
 	return convert_to_render_target(out_color, true, false);
 }
 

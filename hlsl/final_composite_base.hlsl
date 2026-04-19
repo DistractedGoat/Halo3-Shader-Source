@@ -41,6 +41,17 @@ LOCAL_SAMPLER_2D(ssgi_buffer, 15);
 // RGBA16_FLOAT: .rgb=SSR color (pre-exposure HDR), .a=confidence. Unbound → all zeros → no-op.
 Texture2D<float4> ssr_debug_overlay : register(t14);
 
+// Roughness debug (bound by 3DMigoto at ps-t8 when $v==1 / F2 toggle)
+// R16_FLOAT: roughness scalar. Unbound → Load() returns 0.0 → no-op (sky also 0.0 from clear).
+// Moved from t20 → t8: 3DMigoto can't bind high-numbered ps-t slots reliably (confirmed empirically
+// — ao_buffer@t10, ssr_debug@t14, ssgi@t15 all work; t20 does not).
+Texture2D<float> debug_roughness_tex : register(t8);
+
+// Current-frame raw depth (bound by 3DMigoto at ps-t9 when $v==1 / F2 toggle)
+// R32_FLOAT reverse-Z depth from ResourceCurrentDepthCopy. Sky = 0.0; any geometry > 0.0.
+// Used by color-band roughness diagnostic to distinguish sky from unwritten geometry.
+Texture2D<float> debug_depth_tex : register(t9);
+
 // SSR removed from final_composite — now injected per-surface (water_shading.fx etc.)
 
 // define default functions, if they haven't been already
@@ -322,9 +333,33 @@ float4 default_ps(SCREEN_POSITION_INPUT(screen_position), in float2 texcoord :TE
 		float4 ssrDbg = ssr_debug_overlay.Load(int3(int2(texcoord * float2(1920.0f, 1080.0f)), 0));
 		if (ssrDbg.a > 0.001f)
 		{
-			result.rgb = ssrDbg.rgb / max(g_exposure.r, 1e-4f);
+			if (ssrDbg.a > 1.5f)
+				result.rgb = ssrDbg.rgb;  // debug sentinel (alpha=2.0): already display-linear, no exposure divide
+			else
+				result.rgb = ssrDbg.rgb / max(g_exposure.r, 1e-4f);  // SSR data: pre-exposure HDR, needs divide
 			result.a = 1.0f;
 		}
+	}
+
+	// === Roughness linear grayscale diagnostic (F2 / v-toggle) ===
+	// Reads ResourceRoughness (ps-t8) AND ResourceCurrentDepthCopy (ps-t9) bound via d3dx.ini
+	// when v==1. Emits the raw roughness value as linear [0,1] grayscale:
+	//   BLACK = 0.0 (mirror)       WHITE = 1.0 (fully diffuse)
+	// Sky (rawDepth == 0) passes through as the normal scene so the user keeps spatial context.
+	// When v==0 (unbound): debug_depth_tex.Load() returns 0 → isSky==true everywhere → pass-through
+	// (no overlay painted on geometry). Overlay only paints on real geometry pixels.
+	{
+		int2 pix_r  = int2(texcoord * float2(1920.0f, 1080.0f));
+		float dbg_r = debug_roughness_tex.Load(int3(pix_r, 0));
+		float rawD  = debug_depth_tex.Load(int3(pix_r, 0));
+		bool isSky  = (rawD <= 0.0f);
+		if (!isSky)
+		{
+			// Linear 0..1 grayscale — no gamma, no remap. saturate guards stray NaN/neg/>1 values.
+			float r = saturate(dbg_r);
+			result = float4(r, r, r, 1.0f);
+		}
+		// Sky (or unbound): pass-through, no overlay
 	}
 
 	return result;

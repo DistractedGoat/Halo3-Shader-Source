@@ -330,6 +330,9 @@ struct decorator_pixel
 	float4 _mv_gap         : SV_Target2;  // gap filler — prevents fxc from compacting SV_Target3→o2
 	float  rawDepth        : SV_Target3;
 #endif
+#ifdef ACCUM_PIXEL_HAS_ROUGHNESS
+	float  roughness       : SV_Target4;  // PBR roughness — halo3-ng SSR
+#endif
 };
 #endif
 
@@ -382,6 +385,9 @@ default_ps(
 #ifdef ACCUM_PIXEL_HAS_DEPTH
 	pix._mv_gap         = 0;
 	pix.rawDepth        = screen_position.z;
+#endif
+#ifdef ACCUM_PIXEL_HAS_ROUGHNESS
+	pix.roughness = 0.75f;  // vegetation/ground cover: diffuse-like (matches terrain non-specular default)
 #endif
 	return pix;
 #else

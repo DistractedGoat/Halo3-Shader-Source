@@ -1,5 +1,13 @@
 #line 2 "source\rasterizer\hlsl\patchy_fog.hlsl"
 
+// halo3-ng: patchy_fog is a cosmetic fullscreen depth-sheet atmospheric pass. It must NOT
+// overwrite the SV_Target2/3/4 MRT channels written by the opaque geometry underneath —
+// those are motion vectors, rawDepth, and roughness, all physical/geometric properties of
+// the real surface, not the fog sheet. Same pattern as shadow_apply.hlsl:3 and displacement.hlsl.
+// Without this, the fog PS writes g_roughness_passthrough=0.95f to SV_Target4 on every
+// depth-test-passing pixel — producing the 1-2 m "spherical RED curtain" roughness artifact.
+#define NO_MV_OUTPUT 1
+
 #include "global.fx"
 #include "hlsl_constant_mapping.fx"
 

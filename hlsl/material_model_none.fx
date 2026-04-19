@@ -57,7 +57,7 @@ void calc_material_none_ps(
 	diffuse_radiance= 0.0f;
 	specular_radiance= 0.0f;
 	
-	envmap_specular_reflectance_and_roughness= float4(1.0f, 1.0f, 1.0f, 0.0f);
+	envmap_specular_reflectance_and_roughness= float4(1.0f, 1.0f, 1.0f, 0.95f);  // halo3-ng: 0.95 = diffuse-like default (was 0.0=mirror, incorrect for no-material)
 	envmap_area_specular_only= 0.0f;	
 }
 

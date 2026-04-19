@@ -111,6 +111,10 @@ accum_pixel static_per_pixel_ps(
 	g_motion_vector_passthrough.xy = motion_vector;
 	g_raw_depth_passthrough        = fragment_position.z;
 #endif
+	// halo3-ng: roughness passthrough for SSR cone tracing (organic skin)
+#ifdef ACCUM_PIXEL_HAS_ROUGHNESS
+	g_roughness_passthrough = 0.55f;
+#endif
 	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(out_color, true, false);
 }
 
@@ -171,6 +175,10 @@ accum_pixel dynamic_light_ps(
 #ifdef ACCUM_PIXEL_HAS_MV
 	g_motion_vector_passthrough.xy = motion_vector;
 	g_raw_depth_passthrough        = fragment_position.z;
+#endif
+	// halo3-ng: roughness passthrough for SSR cone tracing (organic skin)
+#ifdef ACCUM_PIXEL_HAS_ROUGHNESS
+	g_roughness_passthrough = 0.55f;
 #endif
 	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(out_color, true, false);
 }
@@ -254,6 +262,10 @@ accum_pixel static_prt_ps(
 	g_motion_vector_passthrough.xy = motion_vector;
 	g_raw_depth_passthrough        = fragment_position.z;
 #endif
+	// halo3-ng: roughness passthrough for SSR cone tracing (organic skin)
+#ifdef ACCUM_PIXEL_HAS_ROUGHNESS
+	g_roughness_passthrough = 0.55f;
+#endif
 	return convert_to_render_target(out_color, true, true);
 }
 
@@ -292,6 +304,10 @@ accum_pixel static_sh_ps(
 #ifdef ACCUM_PIXEL_HAS_MV
 	g_motion_vector_passthrough.xy = motion_vector;
 	g_raw_depth_passthrough        = fragment_position.z;
+#endif
+	// halo3-ng: roughness passthrough for SSR cone tracing (organic skin)
+#ifdef ACCUM_PIXEL_HAS_ROUGHNESS
+	g_roughness_passthrough = 0.55f;
 #endif
 	return convert_to_render_target(out_color, true, true);
 }

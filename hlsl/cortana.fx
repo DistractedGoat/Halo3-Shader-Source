@@ -226,7 +226,7 @@ float4 calc_output_color_with_explicit_light_quadratic(
 	envmap_area_specular_only= max(envmap_area_specular_only, 0.001f);
 #ifdef ENABLE_SSR
 	g_ssr_screen_uv = fragment_position / float2(1920.0f, 1080.0f);
-	g_roughness_passthrough = envmap_specular_reflectance_and_roughness.w;
+	g_roughness_passthrough = derive_legacy_roughness(envmap_specular_reflectance_and_roughness.w, specular_mask);
 #endif
 	float3 envmap_radiance= CALC_ENVMAP(envmap_type)(view_dir, bump_normal, view_reflect_dir, envmap_specular_reflectance_and_roughness, envmap_area_specular_only);
 

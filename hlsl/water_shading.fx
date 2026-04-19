@@ -992,6 +992,21 @@ color_reflection= environment_sample.rgb * alpha;
 			//SSR controls
 			float3 ssr_pre_exposure= pow(ssr_val.rgb / max(g_exposure.r, 1e-4f), 1.2f) * 0.7f;
 			// float3 ssr_pre_exposure= ssr_val.rgb / max(g_exposure.r, 1e-4f);
+			// halo3-ng: soft-knee luminance compression — full SSR contribution
+			// up to lum=1.5, asymptotic ceiling at lum=3.0. Replaces the prior
+			// hard cap (which clipped contribution at the cap). Curve points:
+			//   lum=2.0 → 1.875,  lum=3.0 → 2.25,  lum=10 → 2.775,  lum=∞ → 3.0
+			// Sun glints on ripples no longer bloom to hot spots, but normal
+			// SSR brightness is preserved exactly.
+			float ssr_lum= dot(ssr_pre_exposure, float3(0.2126f, 0.7152f, 0.0722f));
+			if (ssr_lum > 1.5f)
+			{
+				float excess    = ssr_lum - 1.5f;
+				float headroom  = 1.5f;                            // ceiling 3.0 - knee 1.5
+				float compressed= excess / (1.0f + excess / headroom);
+				float softLum   = 1.5f + compressed;
+				ssr_pre_exposure*= softLum / max(ssr_lum, 1e-4f);
+			}
 			color_reflection= lerp(color_reflection, ssr_pre_exposure, saturate(ssr_val.a));
 		}
 		#endif

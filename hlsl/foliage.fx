@@ -298,6 +298,12 @@ accum_pixel static_common_ps(
 	g_raw_depth_passthrough        = vsout.position.z;
 #endif
 
+	// halo3-ng: roughness passthrough for SSR cone tracing
+	// roughness PARAM defaults to 0.0 in many foliage tags — floor at 0.8 (leaves are rough)
+#ifdef ACCUM_PIXEL_HAS_ROUGHNESS
+	g_roughness_passthrough = (roughness > 0.01f) ? roughness : 0.8f;
+#endif
+
 	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(out_color, true, false);
 }
 

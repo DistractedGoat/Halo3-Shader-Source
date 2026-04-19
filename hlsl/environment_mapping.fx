@@ -60,9 +60,31 @@ float3 apply_ssr_blend(
     float  F0         = dot(specular_reflectance_and_roughness.xyz, float3(0.2126f, 0.7152f, 0.0722f));
     float  ndotv      = saturate(abs(dot(view_dir, normal)));
     float  fresnel    = F0 + (1.0f - F0) * pow(1.0f - ndotv, 5.0f);
-    // Scale confidence by Fresnel: zero when no hit, boosted at grazing angles
-    float  blendWeight = saturate(ibr.a * (1.0f + fresnel * 2.0f));
-    float3 ssr_tinted  = ssr_raw * specular_reflectance_and_roughness.xyz * ssr_strength;
+    // Scale confidence by Fresnel: moderate boost at grazing angles.
+    // Old factor 2.0 tripled confidence at grazing → blew out noisy single-ray SSR.
+    // 0.5 gives 50% boost at max Fresnel — enough for physically-correct emphasis
+    // without amplifying noise from unconverged temporal accumulation.
+    float  blendWeight = saturate(ibr.a * (1.0f + fresnel * 0.5f));
+    // halo3-ng: soft-knee luminance compression on the FINAL tinted SSR.
+    //   - Below knee (1.5): pass-through. NO loss of SSR brightness for normal
+    //     reflections — same response as raw HDR. Hard caps reduced contribution
+    //     at the cap boundary; this preserves the curve up to the knee and
+    //     only asymptotically rolls off above it.
+    //   - Above knee: softLum = knee + excess / (1 + excess/headroom)
+    //     headroom = ceiling - knee. With knee=1.5, ceiling=3.0:
+    //       lum=2.0 → 1.875,   lum=3.0 → 2.25,   lum=10 → 2.775,   lum=∞ → 3.0
+    //   Single combined cap (replaces the prior pre/post double-cap) — multiplies
+    //   are applied first, then a single soft-knee bounds the visible result.
+    float3 ssr_tinted = ssr_raw * specular_reflectance_and_roughness.xyz * ssr_strength;
+    float  ssrLum     = dot(ssr_tinted, float3(0.2126f, 0.7152f, 0.0722f));
+    if (ssrLum > 1.5f)
+    {
+        float excess     = ssrLum - 1.5f;
+        float headroom   = 1.5f;                            // ceiling 3.0 - knee 1.5
+        float compressed = excess / (1.0f + excess / headroom);
+        float softLum    = 1.5f + compressed;
+        ssr_tinted *= softLum / max(ssrLum, 1e-4f);
+    }
     return lerp(env_color, ssr_tinted, blendWeight);
 }
 #endif
@@ -155,7 +177,7 @@ float3 calc_environment_map_dynamic_ps(
 						(reflection_1.rgb * reflection_1.a * 256) * (1.0f-dynamic_environment_blend.rgb);
 	float3 env_color_dyn = reflection * specular_reflectance_and_roughness.xyz * env_tint_color * low_frequency_specular_color;
 #ifdef USE_SSR
-	env_color_dyn = apply_ssr_blend(env_color_dyn, view_dir, normal, specular_reflectance_and_roughness, get_ssr(g_ssr_screen_uv, normal), 4.0f);
+	env_color_dyn = apply_ssr_blend(env_color_dyn, view_dir, normal, specular_reflectance_and_roughness, get_ssr(g_ssr_screen_uv, normal), 2.0f);
 #endif
 	return env_color_dyn;
 //	return float3(lod, lod, lod) / 6.0f;
@@ -306,7 +328,7 @@ float3 calc_environment_map_custom_map_ps(
 
 	float3 env_color_cm = reflection.rgb * specular_reflectance_and_roughness.xyz * low_frequency_specular_color * env_tint_color;
 #ifdef USE_SSR
-	env_color_cm = apply_ssr_blend(env_color_cm, view_dir, normal, specular_reflectance_and_roughness, get_ssr(g_ssr_screen_uv, normal), 4.0f);
+	env_color_cm = apply_ssr_blend(env_color_cm, view_dir, normal, specular_reflectance_and_roughness, get_ssr(g_ssr_screen_uv, normal), 2.0f);
 #endif
 	return env_color_cm;
 }

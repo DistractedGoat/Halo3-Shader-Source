@@ -396,13 +396,20 @@ void calc_material_two_lobe_phong_ps(
 	//output for environment stuff
 	envmap_area_specular_only= area_specular_radiance * prt_ravi_diff.z;
 	envmap_specular_reflectance_and_roughness.xyz=	material_parameters.b * specular_mask * material_parameters.r;
-	envmap_specular_reflectance_and_roughness.w= max(0.01f, 1.01 - material_parameters.a / 200.0f);		// convert specular power to roughness (cheap and bad approximation);
+	// halo3-ng: view-independent roughness for SSR MRT. material_parameters.a is the
+	// fresnel-lerped power = lerp(normal_specular_power, glancing_specular_power, fresnel_blend)
+	// (see calculate_fresnel @ line 39), which is VIEW-DEPENDENT. Writing that to SV_Target4
+	// bakes a fresnel ring into the roughness buffer — SSR then blurs by view angle instead of
+	// by surface property, producing a visible "view-angle oval" that rolls with camera motion.
+	// normal_specular_power is the head-on lobe sharpness (view-independent, PARAM), matching
+	// the convention every other material model uses for its roughness output.
+	envmap_specular_reflectance_and_roughness.w= max(0.01f, 1.01f - normal_specular_power / 200.0f);
 
 	//do diffuse
 	//float3 diffuse_part= ravi_order_3(surface_normal, sh_lighting_coefficients);
 	diffuse_radiance= prt_ravi_diff.x * diffuse_radiance;
 	diffuse_radiance= (simple_light_diffuse_light + diffuse_radiance) * diffuse_coefficient;
-	
+
 }
 
 //*****************************************************************************
@@ -515,7 +522,8 @@ void calc_material_two_lobe_phong_tint_map_ps(
 	//output for environment stuff
 	envmap_area_specular_only= area_specular_radiance * prt_ravi_diff.z;
 	envmap_specular_reflectance_and_roughness.xyz=	material_parameters.b * specular_mask * material_parameters.r;
-	envmap_specular_reflectance_and_roughness.w= max(0.01f, 1.01 - material_parameters.a / 200.0f);		// convert specular power to roughness (cheap and bad approximation);
+	// halo3-ng: view-independent roughness for SSR MRT (same rationale as calc_material_two_lobe_phong_ps).
+	envmap_specular_reflectance_and_roughness.w= max(0.01f, 1.01f - normal_specular_power / 200.0f);
 
 	//do diffuse
 	//float3 diffuse_part= ravi_order_3(surface_normal, sh_lighting_coefficients);

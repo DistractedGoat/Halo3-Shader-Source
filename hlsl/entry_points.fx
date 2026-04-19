@@ -158,6 +158,44 @@ accum_pixel static_default_ps(
 	in albedo_vsout vsout) : SV_Target
 {
 	albedo_pixel result= albedo_ps(vsout);
+#ifdef ACCUM_PIXEL_HAS_DEPTH
+	g_raw_depth_passthrough = vsout.position.z;
+#endif
+#ifdef ACCUM_PIXEL_HAS_ROUGHNESS
+	{
+		// Bump normal was computed by albedo_ps and packed into result.normal.xyz (* 0.5 + 0.5).
+		// Unpack it here to avoid recomputing bumpmap texture samples.
+		// cook_torrance roughness is a per-material PARAM (constant) — not texture-dependent,
+		// so using raw vsout.texcoord (no parallax correction) is correct.
+#ifdef misc_attr_define
+		float4 misc = vsout.misc;
+#else
+		float4 misc = float4(0, 0, 0, 0);
+#endif
+		float3 def_bump   = result.normal.xyz * 2.0f - 1.0f;
+		float3 def_view   = normalize(vsout.fragment_to_camera_world);
+		float3x3 def_tf   = float3x3(normalize(vsout.tangent), normalize(vsout.binormal), normalize(vsout.normal.xyz));
+		float def_vdotn   = dot(def_view, def_bump);
+		float3 def_refl   = (def_vdotn * def_bump - def_view) * 2.0f + def_view;
+		float def_smask;
+		calc_specular_mask_ps(vsout.texcoord, result.albedo_specmask.w, def_smask);
+		float4 def_sh[10] = { (float4)0,(float4)0,(float4)0,(float4)0,(float4)0,
+		                       (float4)0,(float4)0,(float4)0,(float4)0,(float4)0 };
+		float4 def_rgh    = float4(0, 0, 0, 0.95f);
+		float3 def_aspec  = float3(0, 0, 0);
+		float4 def_srad   = float4(0, 0, 0, 0);
+		float3 def_drad   = float3(0, 0, 0);
+		CALC_MATERIAL(material_type)(
+			def_view, vsout.fragment_to_camera_world, def_bump, def_refl,
+			def_sh,
+			float3(0, 0, 1), float3(0, 0, 0),
+			result.albedo_specmask.xyz, def_smask, vsout.texcoord,
+			float4(1, 0, 1, 0),
+			def_tf, misc,
+			def_rgh, def_aspec, def_srad, def_drad);
+		g_roughness_passthrough = derive_legacy_roughness(def_rgh.w, def_smask);
+	}
+#endif
 	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(result.albedo_specmask, true, false);
 }
 
@@ -248,7 +286,7 @@ float4 calc_output_color_with_explicit_light_quadratic(
 #ifdef ENABLE_SSR
 	// Set screen UV + roughness passthrough for SSR blend inside CALC_ENVMAP and SV_Target4 output.
 	g_ssr_screen_uv = fragment_position / float2(1920.0f, 1080.0f);
-	g_roughness_passthrough = envmap_specular_reflectance_and_roughness.w;
+	g_roughness_passthrough = derive_legacy_roughness(envmap_specular_reflectance_and_roughness.w, specular_mask);
 #endif
 	float3 envmap_radiance= CALC_ENVMAP(envmap_type)(view_dir, bump_normal, view_reflect_dir, envmap_specular_reflectance_and_roughness, envmap_area_specular_only);
 
@@ -437,7 +475,7 @@ float4 calc_output_color_with_explicit_light_linear_with_dominant_light(
 #ifdef ENABLE_SSR
 	// Set screen UV + roughness passthrough for SSR blend inside CALC_ENVMAP and SV_Target4 output.
 	g_ssr_screen_uv = fragment_position / float2(1920.0f, 1080.0f);
-	g_roughness_passthrough = envmap_specular_reflectance_and_roughness.w;
+	g_roughness_passthrough = derive_legacy_roughness(envmap_specular_reflectance_and_roughness.w, specular_mask);
 #endif
 	float3 envmap_radiance= CALC_ENVMAP(envmap_type)(view_dir, bump_normal, view_reflect_dir, envmap_specular_reflectance_and_roughness, envmap_area_specular_only);
 
@@ -719,6 +757,10 @@ accum_pixel static_sh_ps(
 		vsout.extinction,
 		vsout.inscatter,
 		misc);
+	// halo3-ng: roughness passthrough handled by calc_output_color_with_explicit_light_quadratic
+	// via #ifdef ENABLE_SSR at entry_points.fx:288:
+	//   g_roughness_passthrough = envmap_specular_reflectance_and_roughness.w
+	// ENABLE_SSR is always defined (global.fx), so this path always fires.
 
 
 #ifdef ACCUM_PIXEL_HAS_DEPTH
@@ -1033,6 +1075,35 @@ accum_pixel static_per_vertex_color_ps(
 	//out_color.xyz= vert_color * g_exposure.rgb;
 	out_color.w= ALPHA_CHANNEL_OUTPUT;
 
+#ifdef ACCUM_PIXEL_HAS_ROUGHNESS
+	// Extract per-material roughness via CALC_MATERIAL with zero-SH (no lighting cost).
+	// static_per_vertex_color_ps is the simplified LOD path — skips CALC_MATERIAL in its main flow,
+	// leaving g_roughness_passthrough at the 0.95 default for all distant geometry.
+	// Fix: call CALC_MATERIAL with dummy inputs to populate envmap_specular_reflectance_and_roughness.w.
+	{
+		float3 vtx_view_dir = normalize(vsout.fragment_to_camera_world);
+		float  vtx_vdotn    = dot(vtx_view_dir, vsout.normal);
+		float3 vtx_refl_dir = (vtx_vdotn * vsout.normal - vtx_view_dir) * 2.0f + vtx_view_dir;
+		float3x3 vtx_tframe = float3x3(vsout.tangent, vsout.binormal, vsout.normal);
+		float  vtx_smask;
+		calc_specular_mask_ps(vsout.texcoord.xy, albedo.w, vtx_smask);
+		float4 vtx_sh[10] = { (float4)0,(float4)0,(float4)0,(float4)0,(float4)0,
+		                      (float4)0,(float4)0,(float4)0,(float4)0,(float4)0 };
+		float4 vtx_rgh   = float4(0, 0, 0, 0.95f);
+		float3 vtx_aspec = float3(0, 0, 0);
+		float4 vtx_srad  = float4(0, 0, 0, 0);
+		float3 vtx_drad  = float3(0, 0, 0);
+		CALC_MATERIAL(material_type)(
+			vtx_view_dir, vsout.fragment_to_camera_world, vsout.normal, vtx_refl_dir,
+			vtx_sh,
+			float3(0, 0, 1), float3(0, 0, 0),
+			albedo.xyz, vtx_smask, vsout.texcoord.xy,
+			float4(1, 0, 1, 0),
+			vtx_tframe, misc,
+			vtx_rgh, vtx_aspec, vtx_srad, vtx_drad);
+		g_roughness_passthrough = derive_legacy_roughness(vtx_rgh.w, vtx_smask);
+	}
+#endif
 #ifdef ACCUM_PIXEL_HAS_DEPTH
 	g_raw_depth_passthrough = vsout.position.z;
 #endif
@@ -1040,7 +1111,7 @@ accum_pixel static_per_vertex_color_ps(
 	g_motion_vector_passthrough.xy = vsout.motion_vector;
 #endif
 	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(out_color, true, false);
-	
+
 }
 
 struct static_prt_vsout
@@ -1525,14 +1596,14 @@ accum_pixel default_dynamic_light_ps(
 
 	float3 specular_multiplier= GET_MATERIAL_ANALYTICAL_SPECULAR_MULTIPLIER(material_type)(specular_mask);
 	
+	float4 spatially_varying_material_parameters = float4(0, 0, 0, 1.0f);	// .a=roughness; 1.0=fully-diffuse default
 	if (dot(specular_multiplier, specular_multiplier) > 0.0001f)			// ###ctchou $PERF unproven 'performance' hack
 	{
 	float3 specular_fresnel_color;
 	float3 specular_albedo_color;
 	float power_or_roughness;
 	float3 analytic_specular_radiance;
-	
-	float4 spatially_varying_material_parameters;
+
 
 	CALC_MATERIAL_ANALYTIC_SPECULAR(material_type)(
 		view_dir,
@@ -1582,6 +1653,22 @@ accum_pixel default_dynamic_light_ps(
 	// set alpha channel
 	out_color.w= ALPHA_CHANNEL_OUTPUT;
 
+#ifdef ACCUM_PIXEL_HAS_ROUGHNESS
+	// halo3-ng: additive-safe roughness write for default_dynamic_light_ps.
+	// Halo 3 uses a single global blend state (no IndependentBlendEnable). Dynamic light
+	// passes run with BLEND_MODE(additive) (color: src=ONE, dst=ONE), and that additive
+	// blend applies to *every* render target in the MRT — including SV_Target4 (roughness).
+	// Writing the real per-material roughness here causes R16 saturation on multi-lit pixels:
+	//   roughness_static + roughness_light0 + roughness_light1 + ... → clamps to 1.0 (white)
+	// → F2 overlay shows white even on shiny materials
+	// → SSR roughness gate (1 - r*r) → 0 → false confidence attenuation
+	// Zero is the additive identity, so the static pass's material roughness survives any
+	// number of dynamic light draws. Diffuse-only materials still get the correct signal
+	// because the static pass leaves g_roughness_passthrough at its module default (0.95).
+	// Mirrors the motion_vector_passthrough discipline (zeroed in additive contexts) and
+	// the patchy_fog.hlsl NO_MV_OUTPUT precedent for the same MRT-saturation issue.
+	g_roughness_passthrough = 0.0f;
+#endif
 #ifdef ACCUM_PIXEL_HAS_DEPTH
 	g_raw_depth_passthrough = vsout.position.z;
 #endif

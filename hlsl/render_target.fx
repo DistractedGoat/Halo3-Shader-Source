@@ -37,6 +37,27 @@ static float  g_raw_depth_passthrough     = 0.0f;  // raw reverse-Z depth (SV_Po
 #endif
 #ifdef ACCUM_PIXEL_HAS_ROUGHNESS
 static float  g_roughness_passthrough     = 0.95f; // PBR roughness [0=mirror, 1=diffuse]; default diffuse-like
+
+// halo3-ng: legacy spec-mask -> PBR roughness shaping.
+// Marmoset-style "PBR Texture Conversion": artist-authored grayscale spec mask
+// (albedo.w-derived or texture-sampled, 1=shiny, 0=matte) acts as a spatial
+// modulator on the per-material PARAM or material_texture.a base roughness.
+//   spec_mask == 1 (shiny):  returns base unchanged  (safe for real PBR .a)
+//   spec_mask == 0 (matte):  returns base + k*(1-base), biased to fully rough
+//   mid-range:               soft pow-shaped curve, quadratic keeps top 30% near-identity
+// Tuning (global, compile-time constants -- promote to PARAM only if per-material
+// override becomes necessary):
+//   K = push strength toward 1.0
+//   P = curve exponent (higher = later ramp-up; more of the mask range stays "shiny")
+#define LEGACY_ROUGHNESS_PUSH_K 0.75f
+#define LEGACY_ROUGHNESS_CURVE_P 2.0f
+
+float derive_legacy_roughness(float base, float spec_mask)
+{
+	float inv = 1.0f - saturate(spec_mask);
+	float w   = pow(inv, LEGACY_ROUGHNESS_CURVE_P) * LEGACY_ROUGHNESS_PUSH_K;
+	return saturate(lerp(base, 1.0f, w));
+}
 #endif
 
 // our output format
@@ -154,6 +175,20 @@ accum_pixel convert_to_render_target_multiplicative(in float4 color, bool clamp_
 	{
 		result.dark_color.rgb= safe_sqrt(result.dark_color.rgb);
 	}
+#endif
+
+// halo3-ng: init MRT passthrough fields for multiplicative blend path — mirrors
+// convert_to_render_target tail block (lines 108-116). Without this, PSes using
+// BLEND_MODE(multiply)/(double_multiply) leave SV_Target2/3/4 uninitialized, which is
+// undefined behavior for PS output and can leak stale values into MV / depth / roughness.
+#ifdef ACCUM_PIXEL_HAS_MV
+	result.motion_vector = g_motion_vector_passthrough;
+#endif
+#ifdef ACCUM_PIXEL_HAS_DEPTH
+	result.rawDepth      = g_raw_depth_passthrough;
+#endif
+#ifdef ACCUM_PIXEL_HAS_ROUGHNESS
+	result.roughness     = g_roughness_passthrough;
 #endif
 
 	return result;

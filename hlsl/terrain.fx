@@ -853,6 +853,34 @@ void get_sh_coefficients(
 	pack_constants(L0_3, L4_7, sh_lighting_coefficients);
 }
 
+#elif ((ENTRY_POINT(entry_point) == ENTRY_POINT_static_prt_ambient) || \
+       (ENTRY_POINT(entry_point) == ENTRY_POINT_static_prt_linear) || \
+       (ENTRY_POINT(entry_point) == ENTRY_POINT_static_prt_quadratic))
+
+// halo3-ng: terrain does not carry PRT coefficients — reuse global SH constants.
+// Lighting quality is the same as static_sh (acceptable at LOD distances).
+// This entry point exists so roughness passthrough is written correctly for SSR.
+struct entry_point_data
+{
+	float4 unused;
+};
+#define BUILD_ENTRY_POINT_DATA(data)	{ data.unused= 0.0f; }
+void get_sh_coefficients(
+	inout entry_point_data data,
+	out float4 sh_lighting_coefficients[10])
+{
+	sh_lighting_coefficients[0]= p_lighting_constant_0;
+	sh_lighting_coefficients[1]= p_lighting_constant_1;
+	sh_lighting_coefficients[2]= p_lighting_constant_2;
+	sh_lighting_coefficients[3]= p_lighting_constant_3;
+	sh_lighting_coefficients[4]= p_lighting_constant_4;
+	sh_lighting_coefficients[5]= p_lighting_constant_5;
+	sh_lighting_coefficients[6]= p_lighting_constant_6;
+	sh_lighting_coefficients[7]= p_lighting_constant_7;
+	sh_lighting_coefficients[8]= p_lighting_constant_8;
+	sh_lighting_coefficients[9]= p_lighting_constant_9;
+}
+
 #else
 
 struct entry_point_data
@@ -1210,6 +1238,16 @@ accum_pixel static_lighting_shared_ps(
 	#endif
 
 	out_color.rgb= (out_color.rgb * extinction + inscatter) * g_exposure.rrr;
+
+	// halo3-ng: roughness passthrough for SSR cone tracing
+#ifdef ACCUM_PIXEL_HAS_ROUGHNESS
+	#if SPECULAR_MATERIAL_COUNT > 0
+		g_roughness_passthrough = max(0.01f, 1.01 - specular.power / 200.0f);
+	#else
+		g_roughness_passthrough = 0.75f;  // non-specular terrain: rock/dirt default
+	#endif
+#endif
+
 	return convert_to_render_target(out_color, true, false);
 }
 
@@ -1390,6 +1428,132 @@ accum_pixel static_sh_ps(
 		inscatter);
 }
 #endif	// ENTRY_POINT_static_sh
+
+
+//================
+// static_prt_ambient / static_prt_linear / static_prt_quadratic
+// halo3-ng: terrain does not carry PRT coefficients; reuse global SH (same quality as
+// static_sh). Only purpose is to provide a valid entry point so roughness is written.
+//================
+
+#if ENTRY_POINT(entry_point) == ENTRY_POINT_static_prt_quadratic
+void static_prt_quadratic_vs(
+	in vertex_type vertex,
+	out float4 position : SV_Position,
+	CLIP_OUTPUT
+	out float2 texcoord : TEXCOORD0,
+	out float3 normal : TEXCOORD1,
+	out float3 binormal : TEXCOORD2,
+	out float3 tangent : TEXCOORD3,
+	out float3 fragment_to_camera_world : TEXCOORD4,
+	out float3 extinction : COLOR0,
+	out float3 inscatter : COLOR1
+#ifdef ACCUM_PIXEL_HAS_MV
+	, out float2 motion_vector : TEXCOORD10
+#endif
+	)
+{
+	default_vertex_transform_vs(vertex, position, texcoord, normal, binormal, tangent, fragment_to_camera_world);
+	compute_scattering(Camera_Position, vertex.position, extinction, inscatter);
+#ifdef ACCUM_PIXEL_HAS_MV
+	motion_vector = compute_motion_vector(position, vertex.position);
+#endif
+	CALC_CLIP(position);
+}
+#endif	// ENTRY_POINT_static_prt_quadratic
+
+#if ENTRY_POINT(entry_point) == ENTRY_POINT_static_prt_linear
+void static_prt_linear_vs(
+	in vertex_type vertex,
+	out float4 position : SV_Position,
+	CLIP_OUTPUT
+	out float2 texcoord : TEXCOORD0,
+	out float3 normal : TEXCOORD1,
+	out float3 binormal : TEXCOORD2,
+	out float3 tangent : TEXCOORD3,
+	out float3 fragment_to_camera_world : TEXCOORD4,
+	out float3 extinction : COLOR0,
+	out float3 inscatter : COLOR1
+#ifdef ACCUM_PIXEL_HAS_MV
+	, out float2 motion_vector : TEXCOORD10
+#endif
+	)
+{
+	default_vertex_transform_vs(vertex, position, texcoord, normal, binormal, tangent, fragment_to_camera_world);
+	compute_scattering(Camera_Position, vertex.position, extinction, inscatter);
+#ifdef ACCUM_PIXEL_HAS_MV
+	motion_vector = compute_motion_vector(position, vertex.position);
+#endif
+	CALC_CLIP(position);
+}
+#endif	// ENTRY_POINT_static_prt_linear
+
+#if ENTRY_POINT(entry_point) == ENTRY_POINT_static_prt_ambient
+void static_prt_ambient_vs(
+	in vertex_type vertex,
+	out float4 position : SV_Position,
+	CLIP_OUTPUT
+	out float2 texcoord : TEXCOORD0,
+	out float3 normal : TEXCOORD1,
+	out float3 binormal : TEXCOORD2,
+	out float3 tangent : TEXCOORD3,
+	out float3 fragment_to_camera_world : TEXCOORD4,
+	out float3 extinction : COLOR0,
+	out float3 inscatter : COLOR1
+#ifdef ACCUM_PIXEL_HAS_MV
+	, out float2 motion_vector : TEXCOORD10
+#endif
+	)
+{
+	default_vertex_transform_vs(vertex, position, texcoord, normal, binormal, tangent, fragment_to_camera_world);
+	compute_scattering(Camera_Position, vertex.position, extinction, inscatter);
+#ifdef ACCUM_PIXEL_HAS_MV
+	motion_vector = compute_motion_vector(position, vertex.position);
+#endif
+	CALC_CLIP(position);
+}
+#endif	// ENTRY_POINT_static_prt_ambient
+
+#if ((ENTRY_POINT(entry_point) == ENTRY_POINT_static_prt_quadratic) || \
+     (ENTRY_POINT(entry_point) == ENTRY_POINT_static_prt_linear) || \
+     (ENTRY_POINT(entry_point) == ENTRY_POINT_static_prt_ambient))
+#ifdef PIXEL_SHADER
+accum_pixel static_prt_ps(
+	SCREEN_POSITION_INPUT(fragment_position),
+	CLIP_INPUT
+	in float2 original_texcoord : TEXCOORD0,
+	in float3 normal : TEXCOORD1,
+	in float3 binormal : TEXCOORD2,
+	in float3 tangent : TEXCOORD3,
+	in float3 fragment_to_camera_world : TEXCOORD4,
+	in float3 extinction : COLOR0,
+	in float3 inscatter : COLOR1
+#ifdef ACCUM_PIXEL_HAS_MV
+	, in float2 motion_vector : TEXCOORD10
+#endif
+	)
+{
+#ifdef ACCUM_PIXEL_HAS_MV
+	g_motion_vector_passthrough.xy = motion_vector;
+	g_raw_depth_passthrough        = fragment_position.z;
+#endif
+	entry_point_data data;
+	BUILD_ENTRY_POINT_DATA(data);
+	accum_pixel result = static_lighting_shared_ps(
+		data,
+		fragment_position,
+		original_texcoord,
+		normal,
+		binormal,
+		tangent,
+		fragment_to_camera_world,
+		extinction,
+		inscatter);
+	return result;
+}
+#endif  // PIXEL_SHADER
+#endif  // prt entry points
+
 
 PARAM_SAMPLER_2D(dynamic_light_gel_texture);
 
@@ -1578,6 +1742,18 @@ accum_pixel dynamic_light_ps(
 	// set color channels
 	out_color.rgb= (out_color.rgb * extinction) * g_exposure.rrr;			// don't need inscatter because that has been added already in static lighting pass
 	out_color.w= 1.0f;
+
+	// halo3-ng: roughness passthrough — mirrors static_lighting_shared_ps.
+	// Without this, dynamic_light_ps leaves g_roughness_passthrough at 0.95 default,
+	// overwriting the correct roughness written by the static lighting pass for any
+	// terrain surface illuminated by a dynamic light.
+#ifdef ACCUM_PIXEL_HAS_ROUGHNESS
+	#if SPECULAR_MATERIAL_COUNT > 0
+		g_roughness_passthrough = max(0.01f, 1.01f - specular.power / 200.0f);
+	#else
+		g_roughness_passthrough = 0.75f;
+	#endif
+#endif
 
 	return convert_to_render_target(out_color, true, true);
 }
