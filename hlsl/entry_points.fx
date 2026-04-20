@@ -4,6 +4,9 @@
 // halo3-ng: shared motion vector computation (moved to motion_vectors.fx)
 #include "motion_vectors.fx"
 
+// halo3-ng: forward-integrated AO/SSGI (declares t7/t8 bindings + apply_ao_ssgi_inline).
+#include "ao_ssgi_inline.fx"
+
 //#ifndef pc
 #define ALPHA_OPTIMIZATION
 //#endif
@@ -210,13 +213,15 @@ float4 calc_output_color_with_explicit_light_quadratic(
 	float3 light_intensity,
 	float3 extinction,
 	float3 inscatter,
-	float4 misc)
+	float4 misc,
+	float2 motion_vector,				// halo3-ng: per-pixel MV for AO/SSGI reprojection; 0 = no reproject
+	float  raw_depth)					// halo3-ng: SV_Position.z for depth-bilateral reprojection reject
 {
 	float3 view_dir= normalize(fragment_to_camera_world);
 
 	// convert view direction to tangent space
 	float3 view_dir_in_tangent_space= mul(tangent_frame, view_dir);
-	
+
 	// compute parallax
 	float2 texcoord;
 	calc_parallax_ps(original_texcoord.xy, view_dir_in_tangent_space, texcoord);
@@ -284,9 +289,14 @@ float4 calc_output_color_with_explicit_light_quadratic(
 	//compute environment map
 	envmap_area_specular_only= max(envmap_area_specular_only, 0.001f);
 #ifdef ENABLE_SSR
-	// Set screen UV + roughness passthrough for SSR blend inside CALC_ENVMAP and SV_Target4 output.
-	g_ssr_screen_uv = fragment_position / float2(1920.0f, 1080.0f);
+	// Set screen UV + MV + roughness passthrough for SSR blend inside CALC_ENVMAP.
+	// MV reprojects ResourceSSRFinal (prev-frame-aligned) back to the matching sample.
+	g_ssr_screen_uv     = fragment_position / float2(1920.0f, 1080.0f);
+	g_ssr_motion_vector = motion_vector;
+#ifdef ACCUM_PIXEL_HAS_ROUGHNESS
+	// Roughness MRT output is only present for geometry with SV_Target4 (not halogram/water/displacement).
 	g_roughness_passthrough = derive_legacy_roughness(envmap_specular_reflectance_and_roughness.w, specular_mask);
+#endif
 #endif
 	float3 envmap_radiance= CALC_ENVMAP(envmap_type)(view_dir, bump_normal, view_reflect_dir, envmap_specular_reflectance_and_roughness, envmap_area_specular_only);
 
@@ -307,7 +317,11 @@ float4 calc_output_color_with_explicit_light_quadratic(
 	out_color.xyz= (out_color.xyz * extinction + inscatter * BLEND_FOG_INSCATTER_SCALE) * g_exposure.rrr;
 	out_color.w= saturate(specular_radiance.w + albedo.w);
 #else
-	out_color.xyz= (diffuse_radiance * albedo.xyz + specular_radiance + self_illum_radiance + envmap_radiance);
+	// halo3-ng: forward-integrated AO/SSGI — diffuse-only.
+	// Specular/envmap/self_illum bypass AO (future phase: bent-normal specular occlusion).
+	float3 diffuse_contribution = diffuse_radiance * albedo.xyz;
+	apply_ao_ssgi_inline(diffuse_contribution, albedo.xyz, bump_normal, fragment_position, motion_vector, raw_depth);
+	out_color.xyz= (diffuse_contribution + specular_radiance + self_illum_radiance + envmap_radiance);
 	APPLY_OVERLAYS(out_color.xyz, texcoord, view_dot_normal)
 	out_color.xyz= (out_color.xyz * extinction + inscatter * BLEND_FOG_INSCATTER_SCALE) * g_exposure.rrr;
 	out_color.w= ALPHA_CHANNEL_OUTPUT;
@@ -331,7 +345,9 @@ float4 calc_output_color_with_explicit_light_linear_with_dominant_light(
 	float3 inscatter,
 	float4 misc,
 	float3 l2_sh_quadratic[5],			// halo3-ng: L2 quadratic coefficients [4..8] (zero if L1-only)
-	bool l2_active)						// halo3-ng: true if L2 sentinel detected
+	bool l2_active,						// halo3-ng: true if L2 sentinel detected
+	float2 motion_vector,				// halo3-ng: per-pixel MV for AO/SSGI reprojection; 0 = no reproject
+	float  raw_depth)					// halo3-ng: SV_Position.z for depth-bilateral reprojection reject
 {
 
 	float3 view_dir= normalize(fragment_to_camera_world);
@@ -473,9 +489,14 @@ float4 calc_output_color_with_explicit_light_linear_with_dominant_light(
 	//compute environment map
 	envmap_area_specular_only= max(envmap_area_specular_only, 0.001f);
 #ifdef ENABLE_SSR
-	// Set screen UV + roughness passthrough for SSR blend inside CALC_ENVMAP and SV_Target4 output.
-	g_ssr_screen_uv = fragment_position / float2(1920.0f, 1080.0f);
+	// Set screen UV + MV + roughness passthrough for SSR blend inside CALC_ENVMAP.
+	// MV reprojects ResourceSSRFinal (prev-frame-aligned) back to the matching sample.
+	g_ssr_screen_uv     = fragment_position / float2(1920.0f, 1080.0f);
+	g_ssr_motion_vector = motion_vector;
+#ifdef ACCUM_PIXEL_HAS_ROUGHNESS
+	// Roughness MRT output is only present for geometry with SV_Target4 (not halogram/water/displacement).
 	g_roughness_passthrough = derive_legacy_roughness(envmap_specular_reflectance_and_roughness.w, specular_mask);
+#endif
 #endif
 	float3 envmap_radiance= CALC_ENVMAP(envmap_type)(view_dir, bump_normal, view_reflect_dir, envmap_specular_reflectance_and_roughness, envmap_area_specular_only);
 
@@ -496,7 +517,10 @@ float4 calc_output_color_with_explicit_light_linear_with_dominant_light(
 	out_color.xyz= (out_color.xyz * extinction + inscatter * BLEND_FOG_INSCATTER_SCALE) * g_exposure.rrr;
 	out_color.w= saturate(specular_radiance.w + albedo.w);
 #else
-	out_color.xyz= (diffuse_radiance * albedo.xyz + specular_radiance + self_illum_radiance + envmap_radiance);
+	// halo3-ng: forward-integrated AO/SSGI — diffuse-only.
+	float3 diffuse_contribution = diffuse_radiance * albedo.xyz;
+	apply_ao_ssgi_inline(diffuse_contribution, albedo.xyz, bump_normal, fragment_position, motion_vector, raw_depth);
+	out_color.xyz= (diffuse_contribution + specular_radiance + self_illum_radiance + envmap_radiance);
 	APPLY_OVERLAYS(out_color.xyz, texcoord, view_dot_normal)
 	out_color.xyz= (out_color.xyz * extinction + inscatter * BLEND_FOG_INSCATTER_SCALE) * g_exposure.rrr;
 	out_color.w= ALPHA_CHANNEL_OUTPUT;
@@ -624,7 +648,13 @@ accum_pixel static_per_pixel_ps(
 			vsout.inscatter,
 			misc,
 			l2_quad,
-			l2_available);
+			l2_available,
+#ifdef ACCUM_PIXEL_HAS_MV
+			vsout.motion_vector,
+#else
+			float2(0.0f, 0.0f),
+#endif
+			vsout.position.z);
 
 	}
 
@@ -756,7 +786,13 @@ accum_pixel static_sh_ps(
 		k_ps_dominant_light_intensity,
 		vsout.extinction,
 		vsout.inscatter,
-		misc);
+		misc,
+#ifdef ACCUM_PIXEL_HAS_MV
+		vsout.motion_vector,
+#else
+		float2(0.0f, 0.0f),
+#endif
+		vsout.position.z);
 	// halo3-ng: roughness passthrough handled by calc_output_color_with_explicit_light_quadratic
 	// via #ifdef ENABLE_SSR at entry_points.fx:288:
 	//   g_roughness_passthrough = envmap_specular_reflectance_and_roughness.w
@@ -932,7 +968,13 @@ accum_pixel static_per_vertex_ps(
 		float3(vsout.texcoord.z, vsout.texcoord.w, vsout.extinction.w),
 		misc,
 		l2_quad_zero,
-		false);
+		false,
+#ifdef ACCUM_PIXEL_HAS_MV
+		vsout.motion_vector,
+#else
+		float2(0.0f, 0.0f),
+#endif
+		vsout.position.z);
 		
 #ifdef ACCUM_PIXEL_HAS_DEPTH
 	g_raw_depth_passthrough = vsout.position.z;
@@ -1427,7 +1469,13 @@ accum_pixel static_prt_ps(
 		k_ps_dominant_light_intensity,
 		vsout.extinction,
 		vsout.inscatter,
-		misc);
+		misc,
+#ifdef ACCUM_PIXEL_HAS_MV
+		vsout.motion_vector,
+#else
+		float2(0.0f, 0.0f),
+#endif
+		vsout.position.z);
 				
 #ifdef ACCUM_PIXEL_HAS_DEPTH
 	g_raw_depth_passthrough = vsout.position.z;

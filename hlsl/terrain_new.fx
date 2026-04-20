@@ -25,6 +25,8 @@
 
 #define DETAIL_MULTIPLIER 4.59479f
 
+#include "ao_ssgi_inline.fx"
+
 PARAM(float4, debug_tint);
 
 float3 calc_pc_albedo_lighting(
@@ -825,7 +827,9 @@ accum_pixel static_lighting_shared_ps_quadratic(
 	in float3 tangent,
 	in float3 fragment_to_camera_world,
 	in float3 extinction,
-	in float3 inscatter)
+	in float3 inscatter,
+	in float2 motion_vector,			// halo3-ng: per-pixel MV for AO/SSGI reprojection; 0 = no reproject
+	in float  raw_depth)				// halo3-ng: SV_Position.z for depth-bilateral reprojection reject
 {	
 	float4 sh_lighting_coefficients[10];
 	float3 dominant_light_direction;
@@ -927,8 +931,11 @@ accum_pixel static_lighting_shared_ps_quadratic(
 	float4 out_color;
 	out_color.a= 1.0f;
 
-	// diffuse light	
+	// diffuse light
 	out_color.rgb= albedo.rgb * (diffuse_light + simple_light_diffuse_light) * diffuse_coefficient;
+
+	// halo3-ng: forward-integrated AO/SSGI (diffuse-only; specular added after, no AO).
+	apply_ao_ssgi_inline(out_color.rgb, albedo.rgb, bump_normal, fragment_position.xy, motion_vector, raw_depth);
 
 	// specular light
 	#if SPECULAR_MATERIAL_COUNT > 0
@@ -965,7 +972,9 @@ accum_pixel static_lighting_shared_ps_linear_with_dominant_light(
 	in float3 tangent,
 	in float3 fragment_to_camera_world,
 	in float3 extinction,
-	in float3 inscatter)
+	in float3 inscatter,
+	in float2 motion_vector,			// halo3-ng: per-pixel MV for AO/SSGI reprojection; 0 = no reproject
+	in float  raw_depth)				// halo3-ng: SV_Position.z for depth-bilateral reprojection reject
 {	
 	float4 sh_lighting_coefficients[4];
 	float3 dominant_light_direction;
@@ -1100,8 +1109,11 @@ accum_pixel static_lighting_shared_ps_linear_with_dominant_light(
 	float4 out_color;
 	out_color.a= 1.0f;
 
-	// diffuse light	
+	// diffuse light
 	out_color.rgb= albedo.rgb * (diffuse_light + simple_light_diffuse_light) * diffuse_coefficient;
+
+	// halo3-ng: forward-integrated AO/SSGI (diffuse-only; specular added after, no AO).
+	apply_ao_ssgi_inline(out_color.rgb, albedo.rgb, bump_normal, fragment_position.xy, motion_vector, raw_depth);
 
 	// specular light
 	#if SPECULAR_MATERIAL_COUNT > 0
@@ -1157,7 +1169,13 @@ accum_pixel static_per_pixel_ps(
 	return static_lighting_shared_ps_linear_with_dominant_light(
 		data, fragment_position, original_texcoord,
 		normal, binormal, tangent,
-		fragment_to_camera_world, extinction, inscatter);
+		fragment_to_camera_world, extinction, inscatter,
+#ifdef ACCUM_PIXEL_HAS_MV
+		motion_vector,
+#else
+		float2(0.0f, 0.0f),
+#endif
+		fragment_position.z);
 
 }
 #endif // ENTRY_POINT_static_per_pixel
@@ -1274,7 +1292,13 @@ accum_pixel static_per_vertex_ps(
 		tangent,
 		fragment_to_camera_world,
 		extinction,
-		float3(original_texcoord.z, original_texcoord.w, extinction.w));
+		float3(original_texcoord.z, original_texcoord.w, extinction.w),
+#ifdef ACCUM_PIXEL_HAS_MV
+		motion_vector,
+#else
+		float2(0.0f, 0.0f),
+#endif
+		fragment_position.z);
 }
 #endif // PIXEL_SHADER
 #endif // ENTRY_POINT_static_per_vertex
@@ -1343,7 +1367,13 @@ accum_pixel static_sh_ps(
 		tangent,
 		fragment_to_camera_world,
 		extinction,
-		inscatter);
+		inscatter,
+#ifdef ACCUM_PIXEL_HAS_MV
+		motion_vector,
+#else
+		float2(0.0f, 0.0f),
+#endif
+		fragment_position.z);
 }
 #endif  // PIXEL_SHADER
 #endif	// ENTRY_POINT_static_sh
@@ -1598,7 +1628,13 @@ accum_pixel static_prt_ps(
 		tangent,
 		fragment_to_camera_world,
 		extinction,
-		inscatter);
+		inscatter,
+#ifdef ACCUM_PIXEL_HAS_MV
+		motion_vector,
+#else
+		float2(0.0f, 0.0f),
+#endif
+		fragment_position.z);
 }
 #endif  // PIXEL_SHADER
 #endif  // quadratic / linear / ambient prt ps

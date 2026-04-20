@@ -21,16 +21,42 @@ PARAM(float, env_topcoat_bias);
 PARAM(float, env_roughness_scale);
 
 // halo3-ng SSR injection — ResourceSSRFinal bound to t19 by ShaderRegexBindSSR at runtime.
-// g_ssr_screen_uv set by entry_points.fx (and glass.fx) immediately before CALC_ENVMAP() call.
+// g_ssr_screen_uv and g_ssr_motion_vector set by entry_points.fx / cortana.fx / terrain
+// immediately before CALC_ENVMAP() call. MV reprojection: ResourceSSRFinal was written by
+// compute at [Present] of the previous frame (prev-frame geometry); prevUV = currUV - MV
+// brings the current fragment back to the matching sample. Pass float2(0,0) for no reproject.
 #ifdef ENABLE_SSR
-static float2 g_ssr_screen_uv = float2(0.0f, 0.0f);
+static float2 g_ssr_screen_uv    = float2(0.0f, 0.0f);
+static float2 g_ssr_motion_vector= float2(0.0f, 0.0f);
 Texture2D<float4> ssr_buffer : register(t19);
 
 // Returns ResourceSSRFinal sample: .rgb = HDR reflected scene color (pre-multiplied by g_exposure),
 // .a = blend confidence [0..1] (0 = no hit / full miss, 1 = reliable hit).
 float4 get_ssr(float2 screen_uv, float3 normal)
 {
-    return ssr_buffer.Load(int3(int2(screen_uv * float2(1920.0f, 1080.0f)), 0));
+    // Broken-MV guard: 1p hands/weapons double-count camera motion in compute_motion_vector.
+    // Fade reprojection to zero for |mv|^2 in [0.0004, 0.0009] (|mv| ~0.02..0.03 UV).
+    float  mv_len_sq = dot(g_ssr_motion_vector, g_ssr_motion_vector);
+    float  mv_scale  = 1.0f - saturate((mv_len_sq - 0.0004f) / 0.0005f);
+    float2 mv_used   = g_ssr_motion_vector * mv_scale;
+    float2 reproj_uv = saturate(screen_uv - mv_used);
+
+    // Bilinear 4-tap (Load-based): kills integer-snap judder on subpixel reprojection.
+    const float2 viewport_size = float2(1920.0f, 1080.0f);
+    float2 reproj_pix_f = reproj_uv * viewport_size - 0.5f;
+    float2 pix_floor    = floor(reproj_pix_f);
+    float2 frac         = saturate(reproj_pix_f - pix_floor);
+    int2   pix00        = clamp(int2(pix_floor), int2(0, 0), int2(viewport_size) - 2);
+    float4 s00 = ssr_buffer.Load(int3(pix00 + int2(0, 0), 0));
+    float4 s10 = ssr_buffer.Load(int3(pix00 + int2(1, 0), 0));
+    float4 s01 = ssr_buffer.Load(int3(pix00 + int2(0, 1), 0));
+    float4 s11 = ssr_buffer.Load(int3(pix00 + int2(1, 1), 0));
+    float4 wb;
+    wb.x = (1.0f - frac.x) * (1.0f - frac.y);
+    wb.y = frac.x          * (1.0f - frac.y);
+    wb.z = (1.0f - frac.x) * frac.y;
+    wb.w = frac.x          * frac.y;
+    return s00 * wb.x + s10 * wb.y + s01 * wb.z + s11 * wb.w;
 }
 
 // Physically-based SSR blend — replaces or augments the cubemap reflection.

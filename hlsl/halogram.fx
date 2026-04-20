@@ -1,5 +1,8 @@
 // halo3-ng: holograms are volumetric effects, not scene geometry — no motion vectors
 #define NO_MV_OUTPUT 1
+// halo3-ng: halograms skip AO/SSGI (additive/volumetric surfaces don't receive indirect lighting).
+// Guards ao_ssgi_inline.fx register(t21/t22) decls + apply_ao_ssgi_inline body → no-op.
+#define HALOGRAM_SHADER 1
 
 // .halogram is basically the same as .shader, except it has several hardcoded categories:
 //      albedo                  as .shader

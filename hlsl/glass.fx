@@ -250,7 +250,34 @@ accum_pixel static_sh_ps(
 	float3 reflection= calc_reflection_ps(view_dir, nromal_dir, reflect_dir);
 #ifdef ENABLE_SSR
 	{
-		float4 ssr_glass = ssr_buffer_glass.Load(int3(int2(fragment_position.xy), 0));
+		// halo3-ng: reproject SSR sample back to prev-frame UV where compute wrote it.
+		// ResourceSSRFinal is produced at [Present] referencing prev-frame geometry;
+		// MV from the current forward pass brings the current fragment to the matching sample.
+		const float2 viewport_size = float2(1920.0f, 1080.0f);
+		float2 curr_uv   = (fragment_position.xy + float2(0.5f, 0.5f)) / viewport_size;
+	#ifdef ACCUM_PIXEL_HAS_MV
+		// Broken-MV guard (see ao_ssgi_inline.fx for rationale).
+		float  mv_len_sq = dot(motion_vector, motion_vector);
+		float  mv_scale  = 1.0f - saturate((mv_len_sq - 0.0004f) / 0.0005f);
+		float2 reproj_uv = saturate(curr_uv - motion_vector * mv_scale);
+	#else
+		float2 reproj_uv = curr_uv;
+	#endif
+		// Bilinear 4-tap (Load-based) to kill integer-snap judder.
+		float2 reproj_pix_f = reproj_uv * viewport_size - 0.5f;
+		float2 pix_floor    = floor(reproj_pix_f);
+		float2 frac         = saturate(reproj_pix_f - pix_floor);
+		int2   pix00        = clamp(int2(pix_floor), int2(0, 0), int2(viewport_size) - 2);
+		float4 g00 = ssr_buffer_glass.Load(int3(pix00 + int2(0, 0), 0));
+		float4 g10 = ssr_buffer_glass.Load(int3(pix00 + int2(1, 0), 0));
+		float4 g01 = ssr_buffer_glass.Load(int3(pix00 + int2(0, 1), 0));
+		float4 g11 = ssr_buffer_glass.Load(int3(pix00 + int2(1, 1), 0));
+		float4 gwb;
+		gwb.x = (1.0f - frac.x) * (1.0f - frac.y);
+		gwb.y = frac.x          * (1.0f - frac.y);
+		gwb.z = (1.0f - frac.x) * frac.y;
+		gwb.w = frac.x          * frac.y;
+		float4 ssr_glass = g00 * gwb.x + g10 * gwb.y + g01 * gwb.z + g11 * gwb.w;
 		float3 ssr_raw = ssr_glass.rgb / max(g_exposure.r, 1e-4f);
 		reflection = lerp(reflection, ssr_raw, saturate(ssr_glass.a));
 		g_roughness_passthrough = 0.05f;  // glass: near-mirror → high SSR confidence in trace

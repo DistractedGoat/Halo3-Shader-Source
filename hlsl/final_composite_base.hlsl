@@ -138,75 +138,6 @@ float4 default_ps(SCREEN_POSITION_INPUT(screen_position), in float2 texcoord :TE
 	// final composite
 	float4 combined= COMBINE_HDR_LDR(texcoord);									// sample and blend full resolution render targets
 
-	// === AO — current-frame, no reprojection needed (compute runs pre-draw, zero lag) ===
-	// ao_buffer carries float4(oct(bentN_ws), ao, viewZ) from GTAO pass.
-	// .rg = octahedral-encoded world-space bent normal (Cigolle 2014)
-	// .b  = AO scalar
-	// .a  = viewZ: real-surface flag (0 for sky/water) + fog distance
-	float4 ao_sample = sample2D(ao_buffer, texcoord);
-	float  ao_viewZ  = ao_sample.a;
-	float  ao        = (ao_viewZ > 0.001f) ? saturate(ao_sample.b) : 1.0f;
-
-	// Cavity-aware darkening: compare world-space bent normal (most-open hemisphere direction)
-	// against surface normal from normal_texture (t17, stale SRV from shadow_apply pass).
-	// tilt=1 → open surface (bentN ≈ N), tilt<1 → cavity. lerp(floor, 1, tilt^power) gives a
-	// smooth knee so open surfaces are untouched and only deep cavities kick darker.
-	float ao_effective = ao;
-	if (ao_viewZ > 0.001f)
-	{
-		// DecodeOct (Cigolle et al. 2014) — inlined; shared 4-line form.
-		float2 e = ao_sample.rg;
-		float3 bentN_ws = float3(e.x, e.y, 1.0f - abs(e.x) - abs(e.y));
-		float  oct_t    = saturate(-bentN_ws.z);
-		bentN_ws.x += (bentN_ws.x >= 0.0f ? -oct_t : oct_t);
-		bentN_ws.y += (bentN_ws.y >= 0.0f ? -oct_t : oct_t);
-		bentN_ws = normalize(bentN_ws);
-
-		// Surface normal: normal_texture (t17) is R10G10B10A2_UNORM, decoded n*2-1.
-		// Stale SRV from shadow_apply — reliable for opaque geometry (water gated by viewZ).
-		int2 pix = int2(texcoord * float2(1920.0f, 1080.0f));
-		float3 N_raw = normal_texture.Load(int3(pix, 0)).xyz * 2.0f - 1.0f;
-		float  nLen2 = dot(N_raw, N_raw);
-		if (nLen2 > 0.01f)
-		{
-			float3 N_ws = N_raw * rsqrt(nLen2);
-			float  tilt = saturate(dot(bentN_ws, N_ws));
-
-			const float ao_bn_floor = 0.5f;  // deepest cavity cap — never fully black
-			const float ao_bn_power = 2.0f;  // larger = sharper cavity kick
-			float ao_bn = lerp(ao_bn_floor, 1.0f, pow(tilt, ao_bn_power));
-			ao_effective = saturate(ao * ao_bn);
-		}
-	}
-
-	// Multi-bounce colored AO (Patapom 2018 / UE5 LumenScreenSpaceBentNormal)
-	// albedo_texture (t16) persists from shadow_apply as stale SRV — same as SSGI receiver.
-	// Load() returns raw sRGB bytes; square to approximate gamma-2 decode to linear.
-	float3 albedo_ao = albedo_texture.Load(int3(int2(texcoord * float2(1920.0f, 1080.0f)), 0)).rgb;
-	albedo_ao = albedo_ao * albedo_ao;  // sRGB → ~linear (gamma-2 approximation)
-	// Patapom cubic polynomial: lerp(ao, max(ao, poly), tint_strength) re-tints cavities by
-	// albedo without fully lifting AO — preserves contrast while keeping colored bounce.
-	// ao_effective (AO * bent-normal tilt) is the scalar fed to Patapom.
-	float ao_d = ao_effective;
-	float3 aoV = float3(ao_d, ao_d, ao_d);
-	float3 mb_a =  2.0404f * albedo_ao - 0.3324f;
-	float3 mb_b = -4.7951f * albedo_ao + 0.6417f;
-	float3 mb_c =  2.7552f * albedo_ao + 0.6903f;
-	float  patapom_tint = 0.35f;  // light albedo-tint of cavities without washing out sunlit bright surfaces
-	float3 ao_poly  = ((aoV * mb_a + mb_b) * aoV + mb_c) * aoV;
-	float3 ao_multi = lerp(aoV, max(aoV, ao_poly), patapom_tint);
-	// ao_multi: per-channel darkening — bright-albedo cavities get tint, contrast preserved
-
-	// Fog fade: attenuate AO per-channel toward 1 at distance
-	if (ao_viewZ > 0.001f && ao < 1.0f)
-	{
-		float dist = min(max(ao_viewZ + v_atmosphere_constant_0.w, 0.0f), v_atmosphere_constant_1.w);
-		float3 extinction = exp2(-(v_atmosphere_constant_2.xyz + v_atmosphere_constant_3.xyz) * dist);
-		float fog = 1.0f - dot(extinction, float3(0.333f, 0.333f, 0.333f));
-		float ao_fog_scale = 7.0f;
-		ao_multi = lerp(ao_multi, float3(1.0f, 1.0f, 1.0f), saturate(fog * ao_fog_scale));
-	}
-
 	// === Screen-space contact shadows (halo3-ng, F5 / $s toggle) ===
 	// Applied FIRST — direct-light occlusion belongs to the lighting term, before ambient/indirect.
 	// Soft blend: fog-fade with distance, lighting-aware modulation, min-floor to preserve crevice
@@ -252,68 +183,6 @@ float4 default_ps(SCREEN_POSITION_INPUT(screen_position), in float2 texcoord :TE
 		}
 	}
 	// === end SSS ===
-
-	// === AO multiply — applied AFTER SSS, BEFORE SSGI ===
-	// Order: SSS (direct shadow) → AO (ambient/cavity) → SSGI (bounce light fills the dark).
-	// Multi-bounce per-channel: red surfaces keep reddish tint in cavities, dark surfaces go black.
-	{
-		float ao_scene_strength = 1.0f;   // 0=no AO darkening, 1=full scene darkening
-		float ao_dark_floor     = 0.002f;  // deepest corners reach near-black under strong direct light
-		float3 ao_color = lerp(float3(ao_dark_floor, ao_dark_floor, ao_dark_floor), float3(1.0f, 1.0f, 1.0f), ao_multi);
-		combined.rgb *= lerp(float3(1.0f, 1.0f, 1.0f), ao_color, ao_scene_strength);
-	}
-	// === end AO ===
-
-	// === SSGI indirect diffuse — added LAST so bounce light fills SSS+AO darkened regions ===
-	// Correct lighting model: SSS+AO occlude DIRECT light only; SSGI bounce is added on top.
-	// receiverWeight uses post-shadow `combined` luminance, so SSGI is naturally suppressed in
-	// fully-shadowed regions but the receiver_floor still allows some bounce in deep shadows.
-	{
-		// ssgi_buffer = dedicated 15m-radius GI pass, float4(.rgb=GI, .a=viewZ)
-		float4 gi_reproj = sample2D(ssgi_buffer, texcoord);
-		float3 gi_color = gi_reproj.rgb;
-
-		// Strength scalar applied first, before any fading
-		float ssgi_strength = 7.5f;   // indirect brightness scalar
-		gi_color *= ssgi_strength;
-
-		// viewZ from SSGI buffer .a — used only for fog fade distance.
-		// NOTE: do NOT gate the GI add on this value. True sky pixels are safe regardless
-		// because the SSGI trace writes gi_color=(0,0,0) for sky, making the add a no-op.
-		float z_view_gi = gi_reproj.a;
-
-		// Atmospheric fade — only meaningful for scene pixels (z_view_gi > 0)
-		if (z_view_gi > 0.001f)
-		{
-			float dist_gi = min(max(z_view_gi + v_atmosphere_constant_0.w, 0.0f), v_atmosphere_constant_1.w);
-			float3 extinction_gi = exp2(-(v_atmosphere_constant_2.xyz + v_atmosphere_constant_3.xyz) * dist_gi);
-			float fog_gi = 1.0f - dot(extinction_gi, float3(0.333f, 0.333f, 0.333f));
-			float ssgi_fog_scale = 7.0f;
-			gi_color *= saturate(1.0f - fog_gi * ssgi_fog_scale);
-		}
-
-		// Two-factor receiver: low-freq level from lit scene + high-freq detail from albedo.
-		// receiverWeight: shadows suppress GI (uses actual lit luminance, not raw albedo).
-		// albedoDetail: preserves local texture variation (albedo normalized to its own luminance).
-		//   Soft normalization: albedo / (albedoLum + 0.1) keeps near-black from exploding.
-		//   Clamped to [0.3..2.0]: no texel contributes more than 2x or less than 0.3x average.
-		float ssgi_receiver_power = 1.3f;  // <1=compressed (sqrt-like), 1=linear, >1=strong hotspot
-		float ssgi_receiver_floor = 0.03f;  // minimum GI contribution on fully dark surfaces (was 0.09)
-		float ssgi_detail_blend  = 0.66f;   // 0=no texture detail, 1=full albedo detail modulation
-		float receiverLum = dot(combined.rgb, float3(0.2126f, 0.7152f, 0.0722f));
-		float receiverWeight = lerp(ssgi_receiver_floor, 1.0f, pow(saturate(receiverLum * 4.0f), ssgi_receiver_power));
-		// albedo_texture (t16) persists from shadow_apply as a stale SRV — same mechanism as
-		// normal_texture at t17. No 3DMigoto injection needed.
-		float3 albedo_gi = albedo_texture.Load(int3(int2(texcoord * float2(1920.0f, 1080.0f)), 0)).rgb;
-		float albedoLum_gi = dot(albedo_gi, float3(0.2126f, 0.7152f, 0.0722f));
-		float3 albedoDetail = clamp(albedo_gi / (albedoLum_gi + 0.1f), 0.3f, 2.0f);
-		float3 giReceiver = receiverWeight * lerp(float3(1.0f, 1.0f, 1.0f), albedoDetail, ssgi_detail_blend);
-		// AO-gated indirect: bounce is also occluded by local geometry (PBR-correct).
-		// ao_multi is the per-channel AO already computed above — reusing it keeps SSGI
-		// from re-lighting cavities that AO just darkened.
-		combined.rgb += gi_color * giReceiver * ao_multi;
-	}
-	// === end SSGI ===
 
 	// ============================================================================
 	// PHASE 2 — Specular Occlusion (NOT YET IMPLEMENTED — design notes follow)
@@ -395,11 +264,6 @@ float4 default_ps(SCREEN_POSITION_INPUT(screen_position), in float2 texcoord :TE
    float3 cg0 = sample3D(color_grading0, cgTexC).rgb;
    float3 cg1 = sample3D(color_grading1, cgTexC).rgb;
    result.rgb = lerp(cg0, cg1, cg_blend_factor.x);
-
-	// Saturation boost — compensates for SSGI indirect diffuse washing out colors slightly
-	float sat_boost = 1.1f;  // 1.0=neutral, >1=more saturated, tune to taste
-	float sat_luma = dot(result.rgb, float3(0.2126f, 0.7152f, 0.0722f));
-	result.rgb = lerp(sat_luma.xxx, result.rgb, sat_boost);
 
 	result.a= sqrt( dot(result.rgb, float3(0.299, 0.587, 0.114)) );
 

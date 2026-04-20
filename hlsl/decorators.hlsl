@@ -34,6 +34,14 @@
 
 #include "atmosphere.fx"
 #include "decorators.h"
+#include "ao_ssgi_inline.fx"
+
+// halo3-ng: previous-frame VP matrix (4x1 texture written by copy_vp_to_texture.hlsl).
+// Bound via [ShaderRegexBindDecorPrevVP] (pattern dcl_resource_texture2d.*t23).
+// Decorators have no SV_Target2 MV output, so we reconstruct MV in PS from world_position.
+#if defined(pc) && (DX_VERSION == 11)
+Texture2D<float4> prev_vp_decorator : register(t23);
+#endif
 
 // decorator shader is defined as 'world' vertex type, even though it really doesn't have a vertex type - it does its own custom vertex fetches
 //@generate decorator
@@ -139,9 +147,13 @@ void default_vs(
 	out float4	out_inscatter			:	TEXCOORD2
 #ifdef pc
    ,out float3	out_normal  			:	TEXCOORD3
+   ,out float3	out_world_position		:	TEXCOORD4	// halo3-ng: for decorator MV reconstruction
 #endif
    )
 {
+#ifdef pc
+	out_world_position = 0.0f;	// halo3-ng: default (overwritten below for non-faded verts)
+#endif
 	
 	
 #ifndef pc
@@ -253,8 +265,12 @@ void default_vs(
 	world_position.xy += wind_vector.xy * height_scale;													// apply wind vector after transformation
 
 	out_position= mul(float4(world_position.xyz, 1.0f), View_Projection);
-	
-#ifdef DECORATOR_SHADED_LIGHT	
+
+#ifdef pc
+	out_world_position = world_position.xyz;	// halo3-ng: for prev-VP MV reconstruction in PS
+#endif
+
+#ifdef DECORATOR_SHADED_LIGHT
 	float3 world_normal= rotated_position;
 #else
 	float3 world_normal= quaternion_transform_point(instance_quaternion, vertex_normal.xyz);
@@ -348,6 +364,7 @@ default_ps(
 	in float4	inscatter			:	TEXCOORD2
 #ifdef pc
    ,in float3	normal   			:	TEXCOORD3
+   ,in float3	world_position		:	TEXCOORD4	// halo3-ng: for MV reconstruction
 #endif
    ) : SV_Target0					// w unused
 {
@@ -365,10 +382,37 @@ default_ps(
 #endif // pc
 
 	texcoord= sampleBiasGlobal2D(diffuse_texture, texcoord.xy);								// ###HACK warning: I should use a new variable to hold the albedo sample, but re-using texcoord makes the stupid HLSL compiler generate one less GPR
-	
-	float4 color= texcoord * light + inscatter;
 
-#if DX_VERSION == 11	
+	// halo3-ng: forward-integrated AO/SSGI — applied to diffuse (albedo*light) only,
+	// before inscatter is added so fog isn't darkened by AO. Engine fog attenuates AO/GI
+	// naturally downstream — no internal fog-fade in the helper.
+	// Decorators have no SV_Target2 per-pixel MV, so we reconstruct a camera-derived MV
+	// from world_position * prev_VP (decorators are static, so camera motion IS the MV).
+	float2 decorator_mv = float2(0.0f, 0.0f);
+#if defined(pc) && (DX_VERSION == 11)
+	float4 prevVP_r0 = prev_vp_decorator.Load(int3(0, 0, 0));
+	if (prevVP_r0.x != 0.0f || prevVP_r0.y != 0.0f || prevVP_r0.z != 0.0f || prevVP_r0.w != 0.0f)
+	{
+		float4x4 prevVP = float4x4(
+			prevVP_r0,
+			prev_vp_decorator.Load(int3(1, 0, 0)),
+			prev_vp_decorator.Load(int3(2, 0, 0)),
+			prev_vp_decorator.Load(int3(3, 0, 0)));
+		float4 prevClip = mul(float4(world_position, 1.0f), prevVP);
+		if (abs(prevClip.w) > 1e-6f)
+		{
+			float2 prevNDC = prevClip.xy / prevClip.w;
+			float2 prevUV  = prevNDC * float2(0.5f, -0.5f) + 0.5f;
+			float2 currUV  = (screen_position.xy + 0.5f) / float2(1920.0f, 1080.0f);
+			decorator_mv   = currUV - prevUV;
+		}
+	}
+#endif
+	float3 diffuse_lit = texcoord.rgb * light.rgb;
+	apply_ao_ssgi_inline(diffuse_lit, texcoord.rgb, normal, screen_position.xy, decorator_mv, screen_position.z);
+	float4 color = float4(diffuse_lit + inscatter.rgb, texcoord.a);
+
+#if DX_VERSION == 11
 	clip(color.a - k_decorator_alpha_test_threshold);								// alpha clip on D3D11
 #endif
 

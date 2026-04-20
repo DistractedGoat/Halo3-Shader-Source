@@ -144,7 +144,8 @@ float4 calc_output_color_with_explicit_light_quadratic(
 	float3 light_intensity,
 	float3 extinction,
 	float4 inscatter,
-	in float4 misc)
+	in float4 misc,
+	float2 motion_vector)				// halo3-ng: per-pixel MV for SSR reprojection; 0 = no reproject
 {
 	float3 view_dir= normalize(fragment_to_camera_world);
 
@@ -225,7 +226,8 @@ float4 calc_output_color_with_explicit_light_quadratic(
 	//compute environment map
 	envmap_area_specular_only= max(envmap_area_specular_only, 0.001f);
 #ifdef ENABLE_SSR
-	g_ssr_screen_uv = fragment_position / float2(1920.0f, 1080.0f);
+	g_ssr_screen_uv     = fragment_position / float2(1920.0f, 1080.0f);
+	g_ssr_motion_vector = motion_vector;
 	g_roughness_passthrough = derive_legacy_roughness(envmap_specular_reflectance_and_roughness.w, specular_mask);
 #endif
 	float3 envmap_radiance= CALC_ENVMAP(envmap_type)(view_dir, bump_normal, view_reflect_dir, envmap_specular_reflectance_and_roughness, envmap_area_specular_only);
@@ -404,7 +406,13 @@ accum_pixel static_prt_ps(
 		k_ps_dominant_light_intensity,
 		vsout.extinction,
 		vsout.inscatter,
-		misc);
+		misc,
+#ifdef ACCUM_PIXEL_HAS_MV
+		vsout.motion_vector
+#else
+		float2(0.0f, 0.0f)
+#endif
+		);
 
 #ifdef ACCUM_PIXEL_HAS_MV
 	g_motion_vector_passthrough.xy = vsout.motion_vector;
@@ -517,7 +525,13 @@ accum_pixel static_sh_ps(
 		k_ps_dominant_light_intensity,
 		vsout.extinction,
 		vsout.inscatter,
-		misc);
+		misc,
+#ifdef ACCUM_PIXEL_HAS_MV
+		vsout.motion_vector
+#else
+		float2(0.0f, 0.0f)
+#endif
+		);
 
 #ifdef ACCUM_PIXEL_HAS_MV
 	g_motion_vector_passthrough.xy = vsout.motion_vector;
@@ -613,7 +627,13 @@ accum_pixel active_camo_ps(
 		k_ps_dominant_light_intensity,
 		vsout.extinction,
 		vsout.inscatter,
-		misc);
+		misc,
+#ifdef ACCUM_PIXEL_HAS_MV
+		vsout.motion_vector
+#else
+		float2(0.0f, 0.0f)
+#endif
+		);
 
 	// grab screen position
 	float2 uv = float2((vsout.position.x + 0.5f) / texture_size.x, (vsout.position.y + 0.5f) / texture_size.y);
