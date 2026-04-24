@@ -277,14 +277,25 @@ void default_vs(
 #endif		
 	world_normal= normalize(world_normal);					// get rid of scale
 
+	// halo3-ng (April 23 2026) — reverted to VANILLA lighting normal behaviour:
+	//   · DECORATOR_DYNAMIC_LIGHTS uses `two_sided_normal` (camera-facing flip on the
+	//     geometric normal) so the simple-light integrator always sees a front-face.
+	//   · DECORATOR_DOMINANT_LIGHT uses `world_normal` (raw geometric normal) so the
+	//     sun lobe respects true orientation.
+	// The previous origin-out "dome" normal produced a tuft-of-grass response but made
+	// dynamic lights ignore decorator orientation entirely and biased the sun lobe away
+	// from the actual per-sheet geometry. Reverting restores Bungie's intended per-sheet
+	// shading at the cost of the dome softness — any follow-up softening should live in
+	// the PS or a post-process, not by mutating the VS lighting normal.
+
 	float3 fragment_to_camera_world= Camera_Position - world_position.xyz;
 	float3 view_dir= normalize(fragment_to_camera_world);
 
 	float3 diffuse_dynamic_light= 0.0f;
-#ifdef DECORATOR_DYNAMIC_LIGHTS		
+#ifdef DECORATOR_DYNAMIC_LIGHTS
 	// point normal towards camera (two-sided only!)
 	float3 two_sided_normal= world_normal * sign(dot(world_normal, fragment_to_camera_world));
-	
+
 	// accumulate dynamic lights
 	calc_simple_lights_analytical_diffuse_translucent(
 		world_position,
@@ -294,7 +305,7 @@ void default_vs(
 #endif // DECORATOR_DYNAMIC_LIGHTS
 
 #ifdef DECORATOR_DOMINANT_LIGHT
-	diffuse_dynamic_light += 
+	diffuse_dynamic_light +=
 		motion_scale * sun_color * calc_diffuse_lobe(world_normal, sun_direction, translucency);
 #endif // DECORATOR_DOMINANT_LIGHT
 

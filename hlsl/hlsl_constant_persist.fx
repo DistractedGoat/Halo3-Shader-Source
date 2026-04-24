@@ -15,7 +15,15 @@
 #define always_true true
 #endif
 
-CBUFFER_BEGIN(ViewVS)
+// halo3-ng: ViewVS / ExposureVS / AtmosphereVS pinned to explicit registers (b0/b1/b2)
+// so 3DMigoto can directly bind them to compute shaders without a capture indirection.
+// Previously CBUFFER_BEGIN(AtmosphereVS) auto-assigned slots per-permutation, which meant
+// a blanket `cs-cb1 = vs-cb2` or `copy ps-cb1` would read whatever abstract CB the FX
+// compiler happened to pack at that physical slot — different per shader, causing the
+// SSS sun-direction drift across BSPs. Pinning is reflection-visible to the engine's C++
+// binding layer (rasterizer_dx11_define_fx_constants.h uses ID3D11ShaderReflection), so
+// VSSetConstantBuffers calls the pinned slot automatically.
+CBUFFER_BEGIN_FIXED(ViewVS, 0)
 	CBUFFER_CONST(ViewVS, 		float4x4,	View_Projection,			k_viewproj_xform)
 	CBUFFER_CONST(ViewVS,		float4x4,	View,						k_view_xform)
 	CBUFFER_CONST(ViewVS,		float4x2,	Screen,						k_screen_xform)
@@ -40,12 +48,12 @@ SHADER_CONST_ALIAS(ViewVS,		float3,		Camera_Position,			View._m03_m13_m23,					k
 SHADER_CONST_ALIAS(ViewVS,		float4,		Screen_X,					Screen._m00_m10_m20_m30,			k_screen_xform_x,		k_screen_xform,		0)
 SHADER_CONST_ALIAS(ViewVS,		float4,		Screen_Y,					Screen._m01_m11_m21_m31,			k_screen_xform_y,		k_screen_xform,		16)
 	
-CBUFFER_BEGIN(ExposureVS)	
+CBUFFER_BEGIN_FIXED(ExposureVS, 1)
 	CBUFFER_CONST(ExposureVS,	float4,		v_exposure,					k_vs_exposure)
 	CBUFFER_CONST(ExposureVS,	float4,		v_alt_exposure,				k_vs_alt_exposure)
 CBUFFER_END
 
-CBUFFER_BEGIN(AtmosphereVS)
+CBUFFER_BEGIN_FIXED(AtmosphereVS, 2)
 	CBUFFER_CONST(AtmosphereVS,	float4,		v_atmosphere_constant_0,		k_vs_atmosphere_constant_0)
 	CBUFFER_CONST(AtmosphereVS,	float4,		v_atmosphere_constant_1,		k_vs_atmosphere_constant_1)
 	CBUFFER_CONST(AtmosphereVS,	float4,		v_atmosphere_constant_2,		k_vs_atmosphere_constant_2)

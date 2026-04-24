@@ -35,6 +35,9 @@
 
 #include "motion_vectors.fx"
 
+// halo3-ng: forward-integrated AO/SSGI (declares t21..t26 bindings + apply_ao_ssgi_inline).
+#include "ao_ssgi_inline.fx"
+
 PARAM(float, g_tree_animation_coeff);
 
 PARAM(float, animation_amplitude_horizontal);
@@ -229,6 +232,9 @@ struct static_common_vsout
 #ifdef ACCUM_PIXEL_HAS_MV
 	float2 motion_vector			: TEXCOORD10;
 #endif
+	// halo3-ng: world-space vertex normal for directional SSGI reconstruction
+	// (foliage has no per-pixel bump — carries the VS input normal to the PS).
+	float3 world_normal				: TEXCOORD11;
 };
 
 static_common_vsout static_common_vs(
@@ -242,7 +248,8 @@ static_common_vsout static_common_vs(
 	
 	float3 normal= vertex.normal;
 	vsout.texcoord = vertex.texcoord;
-	
+	vsout.world_normal = normal;
+
 	// build sh_lighting_coefficients
 	float4 sh_lighting_coefficients[10]=
 	{
@@ -286,7 +293,17 @@ accum_pixel static_common_ps(
 
 	float4 out_color;
 	float4 albedo = get_albedo(vsout.position);
-	out_color.xyz = (vsout.lighting * albedo.xyz * vsout.extinction + vsout.inscatter * BLEND_FOG_INSCATTER_SCALE) * g_exposure.rrr;
+
+	// halo3-ng: forward-integrated AO/SSGI (pre-fog, pre-exposure).
+	// Engine fog (extinction + inscatter) attenuates the AO/GI contribution at distance.
+	float3 diffuse_lit = vsout.lighting * albedo.xyz;
+	float2 foliage_mv = float2(0.0f, 0.0f);
+#ifdef ACCUM_PIXEL_HAS_MV
+	foliage_mv = vsout.motion_vector;
+#endif
+	apply_ao_ssgi_inline(diffuse_lit, albedo.xyz, vsout.world_normal, vsout.position.xy, foliage_mv, vsout.position.z);
+
+	out_color.xyz = (diffuse_lit * vsout.extinction + vsout.inscatter * BLEND_FOG_INSCATTER_SCALE) * g_exposure.rrr;
 	out_color.w= 0.0f;
 
 #ifndef NO_ALPHA_TO_COVERAGE
@@ -434,6 +451,7 @@ static_common_vsout static_per_vertex_vs(
 	
 	float3 normal= vertex.normal;
 	vsout.texcoord = vertex.texcoord;
+	vsout.world_normal = normal;
 	vsout.lighting = ravi_order_2_with_dominant_light(normal, lighting_constants, dominant_light_direction, dominant_light_intensity);
 	
 	compute_scattering(Camera_Position, vertex.position, vsout.extinction, vsout.inscatter);

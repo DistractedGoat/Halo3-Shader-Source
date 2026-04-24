@@ -52,11 +52,9 @@ Texture2D<float> debug_roughness_tex : register(t8);
 // Used by color-band roughness diagnostic to distinguish sky from unwritten geometry.
 Texture2D<float> debug_depth_tex : register(t9);
 
-// Screen-space shadow factor (bound by 3DMigoto at ps-t11 when $s==1 / F5 toggle).
-// float4: .r=shadow [0=fully shadowed, 1=lit]; .g=hitDistance world units (unused at composite);
-//         .b=viewZ sentinel (0=sky/unbound → no darkening); .a=unused.
-// When ps-t11 is unbound, Load() returns (0,0,0,0) → .b==0 → falls back to 1.0 (no shadow applied).
-Texture2D<float4> sss_texture : register(t11);
+// halo3-ng: SSS moved into forward pass (ao_ssgi_inline.fx) at t32 — applied pre-fog
+// so engine's `out_color * extinction + inscatter` attenuates SSS the same way it
+// attenuates AO/SSGI. Old ps-t11 bind + composite-time multiply deleted.
 
 // SSR removed from final_composite — now injected per-surface (water_shading.fx etc.)
 
@@ -138,51 +136,12 @@ float4 default_ps(SCREEN_POSITION_INPUT(screen_position), in float2 texcoord :TE
 	// final composite
 	float4 combined= COMBINE_HDR_LDR(texcoord);									// sample and blend full resolution render targets
 
-	// === Screen-space contact shadows (halo3-ng, F5 / $s toggle) ===
-	// Applied FIRST — direct-light occlusion belongs to the lighting term, before ambient/indirect.
-	// Soft blend: fog-fade with distance, lighting-aware modulation, min-floor to preserve crevice
-	// detail. Atmosphere extinction reuses the same formula as AO/SSGI for visual coherence.
-	// Sky / water / unbound: .b viewZ sentinel == 0 → sss_factor = 1.0 (no darkening).
-	{
-		int2   pix_sss  = int2(texcoord * float2(1920.0f, 1080.0f));
-		float4 sss_data = sss_texture.Load(int3(pix_sss, 0));
-		float  sss_raw  = sss_data.r;
-		float  sss_viewZ = sss_data.b;
-
-		if (sss_viewZ > 0.001f)
-		{
-			// Tunables (hardcoded — match codebase pattern; flip via shader recompile)
-			const float sss_strength  = 1.0f;   // overall multiplier (0=off, 1=full)
-			const float sss_min_floor = 0.05f;  // deeper contact shadows under direct light; lumWeight gate below protects already-dark pixels
-			const float sss_fog_scale = 10.0f;  // SSS fades faster than AO/SSGI — contact shadows at 40m+ look wrong under atmospheric scatter
-			const float sss_lum_knee  = 0.005f; // only protect near-pitch-black pixels
-			const float sss_lum_full  = 0.06f;  // most lit surfaces get full strength
-			const float sss_lum_min   = 0.65f;  // shadowed pixels still get this fraction of SSS strength
-
-			// Atmospheric fade — distant pixels are drowned in scatter, hard contact shadow
-			// at 80m looks wrong. Use the same extinction formula as AO/SSGI.
-			float sss_dist = min(max(sss_viewZ + v_atmosphere_constant_0.w, 0.0f), v_atmosphere_constant_1.w);
-			float3 sss_extinction = exp2(-(v_atmosphere_constant_2.xyz + v_atmosphere_constant_3.xyz) * sss_dist);
-			float  sss_fog = 1.0f - dot(sss_extinction, float3(0.333f, 0.333f, 0.333f));
-			float  fogFade = saturate(1.0f - sss_fog * sss_fog_scale);
-
-			// Lighting-aware: bright direct-lit pixels darken more than already-dark crevices,
-			// but already-shadowed pixels still get a partial SSS kick (sss_lum_min floor) so
-			// local contact shadows visibly darken even inside baked shadow. Avoids "double
-			// shadow" blow-out while letting SSS deepen ambient-lit crevices.
-			float recvLum    = dot(combined.rgb, float3(0.2126f, 0.7152f, 0.0722f));
-			float lumWeight  = lerp(sss_lum_min, 1.0f, smoothstep(sss_lum_knee, sss_lum_full, recvLum));
-
-			// Final blend: lerp(1, sss_raw, strength) gives base shadow, then floor it,
-			// then scale strength by fog and lighting weight.
-			float strength   = saturate(sss_strength * fogFade * lumWeight);
-			float sss_factor = lerp(1.0f, sss_raw, strength);
-			sss_factor       = max(sss_factor, sss_min_floor);
-
-			combined.rgb *= sss_factor;
-		}
-	}
-	// === end SSS ===
+	// halo3-ng: SSS contact shadows now applied in the forward pass (pre-fog) via
+	// apply_ao_ssgi_inline() at ao_ssgi_inline.fx. Moving the multiply before the
+	// engine's `color * extinction + inscatter` fog blend fixes the composite-time
+	// bug where SSS darkened inscatter (the scattered sky light a contact shadow
+	// physically cannot occlude). The old hand-tuned sss_fog_scale and luminance
+	// weighting are no longer needed — the engine's real atmosphere handles fade.
 
 	// ============================================================================
 	// PHASE 2 — Specular Occlusion (NOT YET IMPLEMENTED — design notes follow)
@@ -281,11 +240,11 @@ float4 default_ps(SCREEN_POSITION_INPUT(screen_position), in float2 texcoord :TE
 	// 	result.a = 1.0f;
 	// }
 
-	// === SSR debug overlay (F3 / z-toggle) ===
-	// Bind ResourceSSRFinal to ps-t14 via d3dx.ini [KeyDebugSSR] to activate.
-	// When ps-t14 is unbound, Load() returns (0,0,0,0) → confidence == 0 → no-op.
-	// When bound: pixels with SSR hits show SSR color; pixels with no hit (confidence==0) pass through.
-	// SSR color is pre-exposure HDR — divide by exposure to bring to display-linear before output.
+	// === SSR debug overlay (F3 / z-toggle) — COMPILE-TIME DISABLED ===
+	// Re-enable by defining DEBUG_SSR_OVERLAY at the top of this file. Runtime-gating via
+	// ssrDbg.a > 0.001f is unreliable: DX11 leaves stale SRVs bound to ps-t14 from material
+	// textures with arbitrary alpha values, causing false-positive overwrites of scene color.
+#ifdef DEBUG_SSR_OVERLAY
 	{
 		float4 ssrDbg = ssr_debug_overlay.Load(int3(int2(texcoord * float2(1920.0f, 1080.0f)), 0));
 		if (ssrDbg.a > 0.001f)
@@ -297,14 +256,16 @@ float4 default_ps(SCREEN_POSITION_INPUT(screen_position), in float2 texcoord :TE
 			result.a = 1.0f;
 		}
 	}
+#endif
 
-	// === Roughness linear grayscale diagnostic (F2 / v-toggle) ===
-	// Reads ResourceRoughness (ps-t8) AND ResourceCurrentDepthCopy (ps-t9) bound via d3dx.ini
-	// when v==1. Emits the raw roughness value as linear [0,1] grayscale:
-	//   BLACK = 0.0 (mirror)       WHITE = 1.0 (fully diffuse)
-	// Sky (rawDepth == 0) passes through as the normal scene so the user keeps spatial context.
-	// When v==0 (unbound): debug_depth_tex.Load() returns 0 → isSky==true everywhere → pass-through
-	// (no overlay painted on geometry). Overlay only paints on real geometry pixels.
+	// === Roughness linear grayscale diagnostic (F2 / v-toggle) — COMPILE-TIME DISABLED ===
+	// Re-enable by defining DEBUG_ROUGHNESS_OVERLAY at the top of this file. Runtime-gating
+	// via "rawD > 0" was unreliable: DX11 leaves stale SRVs bound to ps-t9 from material
+	// depth/mask textures, causing the block to fire on all geometry pixels and overwrite the
+	// scene with grayscale (white close-up) or magenta where ps-t8 held an RGB mask.
+	// This was the root cause of the "Arbiter/AR top/rock white close-up, magenta at distance"
+	// artifact during Phase F2 probe-gather tuning — the diagnostic masqueraded as real GI.
+#ifdef DEBUG_ROUGHNESS_OVERLAY
 	{
 		int2 pix_r  = int2(texcoord * float2(1920.0f, 1080.0f));
 		float dbg_r = debug_roughness_tex.Load(int3(pix_r, 0));
@@ -318,6 +279,7 @@ float4 default_ps(SCREEN_POSITION_INPUT(screen_position), in float2 texcoord :TE
 		}
 		// Sky (or unbound): pass-through, no overlay
 	}
+#endif
 
 	return result;
 }
