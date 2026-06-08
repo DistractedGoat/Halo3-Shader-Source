@@ -25,7 +25,25 @@ float2 compute_motion_vector(float4 current_position, float3 world_position)
 	float2 curr_ndc = current_position.xy / current_position.w;
 	float2 prev_ndc = prev_pos.xy / prev_pos.w;
 	// Output in UV-space: X same sign as NDC, Y flipped (NDC Y-up → UV Y-down)
-	return (curr_ndc - prev_ndc) * float2(0.5f, -0.5f);
+	float2 mv = (curr_ndc - prev_ndc) * float2(0.5f, -0.5f);
+
+	// halo3-ng: first-person / camera-locked geometry (weapon + hands) DOUBLE-COUNTS camera
+	// motion here — world_position follows the camera, so this returns ~the camera-motion MV
+	// even though the gun is fixed on screen. That broken MV makes every screen-space consumer
+	// (AO/SSGI/SSS/SSR) and the compute temporals over-reproject ON the weapon. Suppress it at
+	// the SOURCE so all consumers receive a correct MV and can trust it unconditionally.
+	//   - current_position.w IS view-space depth in BLAM's reverse-Z infinite-far projection
+	//     (clip.w = linear view-Z), and it is the PRE-viewport value → robust to any
+	//     first-person depth-range compression.
+	//   - Gate on depth (weapon range) AND magnitude (only LARGE MVs) so legitimate
+	//     near-geometry motion is left untouched; the per-tap depth rejection in the consumers
+	//     handles disocclusions.
+	// PLATEAU: full kill for w < 2 (covers the whole weapon/hands depth range → matches the
+	// pre-regression behaviour that fully zeroed the weapon MV), smoothly off by w = 3 so
+	// distant geometry keeps full reprojection (a fast pan must not freeze distant effects).
+	float fp_kill = 1.0f - smoothstep(2.0f, 3.0f, current_position.w);
+	mv *= (1.0f - fp_kill * saturate((dot(mv, mv) - 0.0004f) / 0.0005f));
+	return mv;
 }
 #endif // ACCUM_PIXEL_HAS_MV
 

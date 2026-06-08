@@ -130,7 +130,7 @@ void static_per_pixel_vs(
 	out float3 extinction : COLOR0,
 	out float3 inscatter : COLOR1
 #ifdef ACCUM_PIXEL_HAS_MV
-	,out float2 motion_vector : TEXCOORD10
+	,out noperspective float2 motion_vector : TEXCOORD10
 #endif
 	)
 {
@@ -164,7 +164,7 @@ accum_pixel static_per_pixel_ps(
 	in float3 extinction : COLOR0,
 	in float3 inscatter : COLOR1
 #ifdef ACCUM_PIXEL_HAS_MV
-	,in float2 motion_vector : TEXCOORD10
+	,in noperspective float2 motion_vector : TEXCOORD10
 #endif
 	) : SV_Target
 {
@@ -191,7 +191,7 @@ void static_sh_vs(
 	out float3 extinction : COLOR0,
 	out float3 inscatter : COLOR1
 #ifdef ACCUM_PIXEL_HAS_MV
-	,out float2 motion_vector : TEXCOORD10
+	,out noperspective float2 motion_vector : TEXCOORD10
 #endif
 	)
 {
@@ -228,7 +228,7 @@ accum_pixel static_sh_ps(
 	in float3 extinction : COLOR0,
 	in float3 inscatter : COLOR1
 #ifdef ACCUM_PIXEL_HAS_MV
-	,in float2 motion_vector : TEXCOORD10
+	,in noperspective float2 motion_vector : TEXCOORD10
 #endif
 	) : SV_Target
 {
@@ -256,10 +256,9 @@ accum_pixel static_sh_ps(
 		const float2 viewport_size = float2(1920.0f, 1080.0f);
 		float2 curr_uv   = (fragment_position.xy + float2(0.5f, 0.5f)) / viewport_size;
 	#ifdef ACCUM_PIXEL_HAS_MV
-		// Broken-MV guard (see ao_ssgi_inline.fx for rationale).
-		float  mv_len_sq = dot(motion_vector, motion_vector);
-		float  mv_scale  = 1.0f - saturate((mv_len_sq - 0.0004f) / 0.0005f);
-		float2 reproj_uv = saturate(curr_uv - motion_vector * mv_scale);
+		// Broken first-person-weapon MV is suppressed at the SOURCE in compute_motion_vector()
+		// (motion_vectors.fx) — motion_vector is already weapon-corrected, trust it directly.
+		float2 reproj_uv = saturate(curr_uv - motion_vector);
 	#else
 		float2 reproj_uv = curr_uv;
 	#endif
@@ -299,7 +298,7 @@ void dynamic_light_vs(
 	out float3 tangent : TEXCOORD3,
 	out float4 fragment_position_shadow : TEXCOORD5
 #ifdef ACCUM_PIXEL_HAS_MV
-	,out float2 motion_vector : TEXCOORD10
+	,out noperspective float2 motion_vector : TEXCOORD10
 #endif
 	)
 {
@@ -335,7 +334,7 @@ accum_pixel dynamic_light_ps(
 	in float3 tangent : TEXCOORD3,
 	in float4 fragment_position_shadow : TEXCOORD5
 #ifdef ACCUM_PIXEL_HAS_MV
-	,in float2 motion_vector : TEXCOORD10
+	,in noperspective float2 motion_vector : TEXCOORD10
 #endif
 	)
 {

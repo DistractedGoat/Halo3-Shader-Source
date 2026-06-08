@@ -610,7 +610,7 @@ void static_per_pixel_vs(
 	out float3 extinction : COLOR0,
 	out float3 inscatter : COLOR1
 #ifdef ACCUM_PIXEL_HAS_MV
-	,out float2 motion_vector : TEXCOORD10
+	,out noperspective float2 motion_vector : TEXCOORD10
 #endif
 )
 {
@@ -1154,7 +1154,7 @@ accum_pixel static_per_pixel_ps(
 	in float3 extinction : COLOR0,
 	in float3 inscatter : COLOR1
 #ifdef ACCUM_PIXEL_HAS_MV
-	,in float2 motion_vector : TEXCOORD10
+	,in noperspective float2 motion_vector : TEXCOORD10
 #endif
 )
 {
@@ -1206,7 +1206,7 @@ void static_per_vertex_vs(
 	out float4 extinction : COLOR0 // w contains inscatter.z
 //	out float3 inscatter : COLOR1
 #ifdef ACCUM_PIXEL_HAS_MV
-	,out float2 motion_vector : TEXCOORD10
+	,out noperspective float2 motion_vector : TEXCOORD10
 #endif
 )
 {
@@ -1272,7 +1272,7 @@ accum_pixel static_per_vertex_ps(
 	in float4 extinction : COLOR0 // w contains inscatter.z
 //	in float3 inscatter : COLOR1
 #ifdef ACCUM_PIXEL_HAS_MV
-	,in float2 motion_vector : TEXCOORD10
+	,in noperspective float2 motion_vector : TEXCOORD10
 #endif
 )
 {
@@ -1321,7 +1321,7 @@ void static_sh_vs(
 	out float3 extinction : COLOR0,
 	out float3 inscatter : COLOR1
 #ifdef ACCUM_PIXEL_HAS_MV
-	,out float2 motion_vector : TEXCOORD10
+	,out noperspective float2 motion_vector : TEXCOORD10
 #endif
 )
 {
@@ -1348,7 +1348,7 @@ accum_pixel static_sh_ps(
 	in float3 extinction : COLOR0,
 	in float3 inscatter : COLOR1
 #ifdef ACCUM_PIXEL_HAS_MV
-	,in float2 motion_vector : TEXCOORD10
+	,in noperspective float2 motion_vector : TEXCOORD10
 #endif
 )
 {
@@ -1455,7 +1455,7 @@ void static_prt_quadratic_vs(
 	out float3 extinction : COLOR0,
 	out float3 inscatter : COLOR1
 #ifdef ACCUM_PIXEL_HAS_MV
-	,out float2 motion_vector : TEXCOORD10
+	,out noperspective float2 motion_vector : TEXCOORD10
 #endif
 )
 {
@@ -1497,7 +1497,7 @@ void static_prt_linear_vs(
 	out float3 extinction : COLOR0,
 	out float3 inscatter : COLOR1
 #ifdef ACCUM_PIXEL_HAS_MV
-	,out float2 motion_vector : TEXCOORD10
+	,out noperspective float2 motion_vector : TEXCOORD10
 #endif
 )
 {
@@ -1559,7 +1559,7 @@ void static_prt_ambient_vs(
 	out float3 extinction : COLOR0,
 	out float3 inscatter : COLOR1
 #ifdef ACCUM_PIXEL_HAS_MV
-	,out float2 motion_vector : TEXCOORD10
+	,out noperspective float2 motion_vector : TEXCOORD10
 #endif
 )
 {
@@ -1609,7 +1609,7 @@ accum_pixel static_prt_ps(
 	in float3 extinction : COLOR0,
 	in float3 inscatter : COLOR1
 #ifdef ACCUM_PIXEL_HAS_MV
-	,in float2 motion_vector : TEXCOORD10
+	,in noperspective float2 motion_vector : TEXCOORD10
 #endif
 )
 {
@@ -1655,7 +1655,7 @@ void default_dynamic_light_vs(
 	out float3 extinction : COLOR0,
 	out float3 inscatter : COLOR1				// homogenous coordinates of the fragment position in projective shadow space)
 #ifdef ACCUM_PIXEL_HAS_MV
-	,out float2 motion_vector : TEXCOORD10
+	,out noperspective float2 motion_vector : TEXCOORD10
 #endif
 )
 {
@@ -1695,7 +1695,7 @@ void dynamic_light_vs(
 	out float3 extinction : COLOR0,
 	out float3 inscatter : COLOR1		// homogenous coordinates of the fragment position in projective shadow space)
 #ifdef ACCUM_PIXEL_HAS_MV
-	,out float2 motion_vector : TEXCOORD10
+	,out noperspective float2 motion_vector : TEXCOORD10
 #endif
 )
 {
@@ -1730,7 +1730,7 @@ void dynamic_light_cine_vs(
 	out float3 extinction : COLOR0,
 	out float3 inscatter : COLOR1		// homogenous coordinates of the fragment position in projective shadow space)
 #ifdef ACCUM_PIXEL_HAS_MV
-	,out float2 motion_vector : TEXCOORD10
+	,out noperspective float2 motion_vector : TEXCOORD10
 #endif
 )
 {
@@ -1765,7 +1765,7 @@ accum_pixel default_dynamic_light_ps(
 	in float3 extinction : COLOR0,
 	in float3 inscatter : COLOR1,		// homogenous coordinates of the fragment position in projective shadow space
 #ifdef ACCUM_PIXEL_HAS_MV
-	in float2 motion_vector : TEXCOORD10,
+	in noperspective float2 motion_vector : TEXCOORD10,
 #endif
 	bool cinematic)
 {
@@ -1909,7 +1909,7 @@ accum_pixel dynamic_light_ps(
 	in float3 extinction : COLOR0,
 	in float3 inscatter : COLOR1		// homogenous coordinates of the fragment position in projective shadow space
 #ifdef ACCUM_PIXEL_HAS_MV
-	,in float2 motion_vector : TEXCOORD10
+	,in noperspective float2 motion_vector : TEXCOORD10
 #endif
 )
 {
@@ -1942,7 +1942,7 @@ accum_pixel dynamic_light_cine_ps(
 	in float3 extinction : COLOR0,
 	in float3 inscatter : COLOR1		// homogenous coordinates of the fragment position in projective shadow space
 #ifdef ACCUM_PIXEL_HAS_MV
-	,in float2 motion_vector : TEXCOORD10
+	,in noperspective float2 motion_vector : TEXCOORD10
 #endif
 )
 {

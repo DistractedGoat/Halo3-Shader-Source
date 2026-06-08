@@ -67,7 +67,7 @@ void static_per_pixel_vs(
 	out float3 extinction : COLOR0,
 	out float3 inscatter : COLOR1
 #ifdef ACCUM_PIXEL_HAS_MV
-	, out float2 motion_vector : TEXCOORD10
+	, out noperspective float2 motion_vector : TEXCOORD10
 #endif
 	)
 {
@@ -102,7 +102,7 @@ accum_pixel static_per_pixel_ps(
 	in float3 extinction : COLOR0,
 	in float3 inscatter : COLOR1
 #ifdef ACCUM_PIXEL_HAS_MV
-	, in float2 motion_vector : TEXCOORD10
+	, in noperspective float2 motion_vector : TEXCOORD10
 #endif
 	) : SV_Target
 {
@@ -130,7 +130,7 @@ void dynamic_light_vs(
 	out float3 tangent : TEXCOORD3,
 	out float4 fragment_position_shadow : TEXCOORD5
 #ifdef ACCUM_PIXEL_HAS_MV
-	, out float2 motion_vector : TEXCOORD10
+	, out noperspective float2 motion_vector : TEXCOORD10
 #endif
 	)
 {
@@ -167,7 +167,7 @@ accum_pixel dynamic_light_ps(
 	in float3 tangent : TEXCOORD3,
 	in float4 fragment_position_shadow : TEXCOORD5
 #ifdef ACCUM_PIXEL_HAS_MV
-	, in float2 motion_vector : TEXCOORD10
+	, in noperspective float2 motion_vector : TEXCOORD10
 #endif
 	)
 {
@@ -188,7 +188,7 @@ void static_prt_ambient_vs(
 	CLIP_OUTPUT
 	out float4 position : SV_Position
 #ifdef ACCUM_PIXEL_HAS_MV
-	, out float2 motion_vector : TEXCOORD10
+	, out noperspective float2 motion_vector : TEXCOORD10
 #endif
 	)
 {
@@ -210,7 +210,7 @@ void static_prt_linear_vs(
 	CLIP_OUTPUT
 	out float4 position : SV_Position
 #ifdef ACCUM_PIXEL_HAS_MV
-	, out float2 motion_vector : TEXCOORD10
+	, out noperspective float2 motion_vector : TEXCOORD10
 #endif
 	)
 {
@@ -232,7 +232,7 @@ void static_prt_quadratic_vs(
 	CLIP_OUTPUT
 	out float4 position : SV_Position
 #ifdef ACCUM_PIXEL_HAS_MV
-	, out float2 motion_vector : TEXCOORD10
+	, out noperspective float2 motion_vector : TEXCOORD10
 #endif
 	)
 {
@@ -253,7 +253,7 @@ accum_pixel static_prt_ps(
 	CLIP_INPUT
 	SCREEN_POSITION_INPUT(fragment_position)
 #ifdef ACCUM_PIXEL_HAS_MV
-	, in float2 motion_vector : TEXCOORD10
+	, in noperspective float2 motion_vector : TEXCOORD10
 #endif
 	)
 {
@@ -275,7 +275,7 @@ void static_sh_vs(
 	CLIP_OUTPUT
 	out float4 position : SV_Position
 #ifdef ACCUM_PIXEL_HAS_MV
-	, out float2 motion_vector : TEXCOORD10
+	, out noperspective float2 motion_vector : TEXCOORD10
 #endif
 	)
 {
@@ -296,7 +296,7 @@ accum_pixel static_sh_ps(
 	CLIP_INPUT
 	SCREEN_POSITION_INPUT(fragment_position)
 #ifdef ACCUM_PIXEL_HAS_MV
-	, in float2 motion_vector : TEXCOORD10
+	, in noperspective float2 motion_vector : TEXCOORD10
 #endif
 	)
 {

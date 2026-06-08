@@ -34,12 +34,11 @@ Texture2D<float4> ssr_buffer : register(t19);
 // .a = blend confidence [0..1] (0 = no hit / full miss, 1 = reliable hit).
 float4 get_ssr(float2 screen_uv, float3 normal)
 {
-    // Broken-MV guard: 1p hands/weapons double-count camera motion in compute_motion_vector.
-    // Fade reprojection to zero for |mv|^2 in [0.0004, 0.0009] (|mv| ~0.02..0.03 UV).
-    float  mv_len_sq = dot(g_ssr_motion_vector, g_ssr_motion_vector);
-    float  mv_scale  = 1.0f - saturate((mv_len_sq - 0.0004f) / 0.0005f);
-    float2 mv_used   = g_ssr_motion_vector * mv_scale;
-    float2 reproj_uv = saturate(screen_uv - mv_used);
+    // The broken first-person-weapon MV guard now lives at the SOURCE in
+    // compute_motion_vector() (motion_vectors.fx) — g_ssr_motion_vector is already
+    // weapon-suppressed, so we trust it unconditionally. (Previously this was an all-depths
+    // magnitude guard that also killed legitimate distant SSR reprojection during pans.)
+    float2 reproj_uv = saturate(screen_uv - g_ssr_motion_vector);
 
     // Bilinear 4-tap (Load-based): kills integer-snap judder on subpixel reprojection.
     const float2 viewport_size = float2(1920.0f, 1080.0f);

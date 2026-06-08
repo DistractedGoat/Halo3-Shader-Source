@@ -37,6 +37,15 @@ VS_OUTPUT default_vs(VS_INPUT input)
 	output.color= input.vColor;
 	output.normal= normalize(input.vPos);
 
+	// halo3-ng: anchor AtmosphereVS (v_atmosphere_constant_0) in this VS's RDEF so the
+	// engine binds it to vs-cb2 (pinned slot) for the sky-dome draw. sky_dome_simple is
+	// @generate sky — the engine uploads the scenario SKY ATMOSPHERE here (not a per-
+	// BSP cluster atmosphere), and this draw runs exactly once per frame. 3DMigoto's
+	// [ShaderOverrideSkyDomeSimpleVS] captures vs-cb2 post-draw into ResourceAtmosphereCB,
+	// giving a deterministic scenario-global SUN_DIR for SSS contact-shadow tracing.
+	// DCE-safe no-op: product with 1e-30 is denormalised to 0 in the position output.
+	output.pos.x += v_atmosphere_constant_0.x * 1e-30f;
+
 	return output;
 }
 

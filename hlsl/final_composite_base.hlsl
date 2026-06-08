@@ -131,6 +131,70 @@ float3 default_calc_blend(in float2 texcoord, in float4 combined, in float4 bloo
 }
 
 
+// ============================================================================
+// halo3-ng: tonemap modes + live knobs (June 2026). See CLAUDE.md "Tonemapping".
+// The lighting overhaul adds indirect fill (SSGI/sky-leak/AO) that LIFTS blacks;
+// the stock Halo cubic tone curve has no toe to re-crush them -> "washed out".
+//   IniParams (Texture1D t120, auto-bound by 3DMigoto): row7 mode, row8 toe, row9 punch.
+//   mode 0 = stock Halo cubic (A/B reference)
+//   mode 1 = toe / black-point restore BEFORE the unchanged cubic+LUT grade (keeps the
+//            original art-director look, just returns shadow contrast) -- default
+//   mode 2 = AgX base curve (replaces the cubic only; LUTs still grade on top)
+// ============================================================================
+Texture1D<float4> tonemap_iniparams : register(t120);
+
+// Minimal AgX (Troy Sobotka display transform; Benjamin Wrensch minimal fit).
+// Constants verified against iolite-engine.com/blog_posts/minimal_agx_implementation.
+// HLSL mul(v, M) row-vector convention preserved from the reference HLSL port -- do NOT
+// transpose these matrices.
+static const float3x3 AGX_MAT = float3x3(
+	0.842479062253094,  0.0423282422610123, 0.0423756549057051,
+	0.0784335999999992, 0.878468636469772,  0.0784336,
+	0.0792237451477643, 0.0791661274605434, 0.879142973793104);
+static const float3x3 AGX_MAT_INV = float3x3(
+	 1.19687900512017,   -0.0528968517574562, -0.0529716355144438,
+	-0.0980208811401368,  1.15190312990417,   -0.0980434501171241,
+	-0.0990297440797205, -0.0989611768448433,  1.15107367264116);
+
+float3 agx_contrast_approx(float3 x)
+{
+	float3 x2 = x * x;
+	float3 x4 = x2 * x2;
+	return 15.5f * x4 * x2 - 40.14f * x4 * x + 31.96f * x4
+	     - 6.868f * x2 * x + 0.4298f * x2 + 0.1191f * x - 0.00232f;
+}
+
+// Linear rec709 in -> linear display out. `punch` 0 = neutral AgX; higher = punchy look.
+float3 agx_tonemap(float3 col, float punch)
+{
+	const float min_ev = -12.47393f;
+	const float max_ev =   4.026069f;
+	float3 val = mul(col, AGX_MAT);
+	val = clamp(log2(max(val, 1e-10f)), min_ev, max_ev);
+	val = (val - min_ev) / (max_ev - min_ev);
+	val = agx_contrast_approx(val);				// ~[0,1], 2.2-gamma'd display
+	if (punch > 1e-4f)							// optional Punchy-style look
+	{
+		float luma  = dot(val, float3(0.2126f, 0.7152f, 0.0722f));
+		float powv  = 1.0f + 0.35f * punch;		// contrast
+		float satv  = 1.0f + 0.40f * punch;		// saturation
+		val = pow(max(val, 0.0f), powv);
+		val = luma + satv * (val - luma);
+		val = saturate(val);
+	}
+	val = mul(val, AGX_MAT_INV);
+	return pow(max(val, 0.0f), 2.2f);			// -> linear display
+}
+
+// Stock Halo 3 tone curve (cubic): clamp [0,1.494] then w·x^3 + z·x^2 + y·x. Punchy
+// highlights (clips toward white), no per-channel desaturation. Operates on LINEAR blend.
+float3 halo_cubic_tonemap(float3 blend)
+{
+	float3 c = min(blend, tone_curve_constants.xxx);
+	return ((c * tone_curve_constants.w + tone_curve_constants.z) * c + tone_curve_constants.y) * c;
+}
+
+
 float4 default_ps(SCREEN_POSITION_INPUT(screen_position), in float2 texcoord :TEXCOORD0) : SV_Target
 {
 	// final composite
@@ -197,6 +261,26 @@ float4 default_ps(SCREEN_POSITION_INPUT(screen_position), in float2 texcoord :TE
 	float4 bloom= CALC_BLOOM(texcoord);											// sample postprocessed buffer(s)
 	float3 blend= CALC_BLEND(texcoord, combined, bloom);						// blend them together
 
+	// halo3-ng tonemap knobs (IniParams t120): row7 mode, row8 toe, row9 agx_punch.
+	float tm_mode      = tonemap_iniparams.Load(int2(7, 0)).x;
+	float tm_toe       = tonemap_iniparams.Load(int2(8, 0)).x;
+	float tm_agx_punch = tonemap_iniparams.Load(int2(9, 0)).x;
+	float tm_agx_hl    = tonemap_iniparams.Load(int2(9, 0)).y;	// mode-2 Halo-highlight blend (row 9 .y; avoids a new IniParams index that needs a texture resize)
+
+	// Mode 1 — soft luminance toe: re-crush the GI-raised blacks BEFORE the original
+	// (unchanged) hue/sat -> contrast -> cubic -> LUT chain, so the art-director grade is
+	// preserved and only shadow contrast returns. `blend` is LINEAR HDR on MCC PC (the
+	// float scene buffer is NOT gamma-2 packed). Lt = L^2/(L+k) gently deepens low
+	// luminance and leaves mids/highlights ~unchanged, applied as a hue-preserving scale
+	// (no per-channel subtract -> no saturation skew, no hard clip -> no thresholding).
+	// tm_toe = k (linear). (mode 0 = untouched.)
+	if (tm_mode > 0.5f && tm_mode < 1.5f && tm_toe > 1e-5f)
+	{
+		float toe_L  = max(dot(blend, float3(0.2126f, 0.7152f, 0.0722f)), 1e-5f);
+		float toe_Lt = toe_L * toe_L / (toe_L + tm_toe);
+		blend *= toe_Lt / toe_L;
+	}
+
 	// apply hue and saturation (3 instructions)
 	blend= mul(float4(blend, 1.0f), ps_postprocess_hue_saturation_matrix);
 
@@ -209,11 +293,32 @@ float4 default_ps(SCREEN_POSITION_INPUT(screen_position), in float2 texcoord :TE
 		blend *= pow(luminance, ps_postprocess_contrast.x) / luminance;
 	}
 
-	// apply tone curve (4 instructions)
-	float3 clamped  = min(blend, tone_curve_constants.xxx);		// default= 1.4938015821857215695824940046795		// r1
-
+	// apply tone curve — mode 0/1 keep the stock Halo cubic; mode 2 = AgX + Halo highlights.
 	float4 result;
-	result.rgb= ((clamped.rgb * tone_curve_constants.w + tone_curve_constants.z) * clamped.rgb + tone_curve_constants.y) * clamped.rgb;		// default linear = 1.0041494251232542828239889869599, quadratic= 0, cubic= - 0.15;
+	if (tm_mode > 1.5f)		// mode 2 — AgX base curve (+ Halo-highlight hybrid)
+	{
+		// `blend` is already LINEAR HDR on MCC PC; AgX consumes linear and (via its EOTF)
+		// returns linear, matching the cubic's ~linear output the LUT + RT expect (no square/sqrt).
+		float3 agx = agx_tonemap(blend, tm_agx_punch);
+
+		// Halo-highlight hybrid: AgX owns shadows/mids (realistic, graceful rolloff), but in
+		// the highlights lerp toward the stock Halo cubic — which clips punchy toward white and
+		// does NOT desaturate — restoring Halo 3's high-contrast highlight character. The blend
+		// is luminance-gated (smoothstep 0.45..0.90 on AgX luma) so shadows/mids stay pure AgX.
+		// tm_agx_hl (Ctrl+F9) = amount: 0 = pure AgX, 1 = full Halo highlights.
+		if (tm_agx_hl > 1e-4f)
+		{
+			float3 cub  = halo_cubic_tonemap(blend);
+			float  agxL = dot(agx, float3(0.2126f, 0.7152f, 0.0722f));
+			float  hlw  = smoothstep(0.45f, 0.90f, agxL) * saturate(tm_agx_hl);
+			agx = lerp(agx, cub, hlw);
+		}
+		result.rgb = agx;
+	}
+	else					// mode 0/1 — stock Halo cubic (punchy highlights preserved)
+	{
+		result.rgb = halo_cubic_tonemap(blend);
+	}
 
    // color grading
    const float rSize = 1.0f / 16.0f;
@@ -280,6 +385,16 @@ float4 default_ps(SCREEN_POSITION_INPUT(screen_position), in float2 texcoord :TE
 		// Sky (or unbound): pass-through, no overlay
 	}
 #endif
+
+	// halo3-ng: earlier drafts anchored AtmosphereVS here to force fxc to keep it in
+	// the PS RDEF at pinned slot b2. That was based on a false premise — AtmosphereVS
+	// is registered with k_vs_* keys only (see hlsl_constant_persist.fx:57-63), so
+	// the engine's C++ constant uploader only routes it via VSSetConstantBuffers.
+	// The anchor forced RDEF retention but the engine never populated ps-cb2 with
+	// atmosphere data; we were reading stale PatchyFogPS bytes reinterpreted as
+	// SUN_DIR, giving wrong-side shadows under any sign convention. The deterministic
+	// capture now happens in sky_dome_simple.hlsl's VS (scenario sky atmosphere,
+	// VS-stage, single draw per frame). See lesson #23 + #24.
 
 	return result;
 }

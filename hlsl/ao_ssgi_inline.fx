@@ -75,6 +75,13 @@ Texture2D<float4> sss_buffer : register(t32);
 // exterior's stored radiance; surfaces facing away stay dark. Independent of trace
 // radius and Malley cosine budget.
 Texture2D<float4> cube_accum : register(t33);
+
+// Zero-DC corner-detail support: wide depth-aware low-pass of HBIL L0
+// (CustomShaderSSGIHBILLowFreq → ResourceSSGIHBILLowFreqL0). The consumer builds
+// detail = HBIL_L0 - lowpass(HBIL_L0) so flat surfaces read ~0 detail and only
+// local contrast (corners / contact bleed) survives — replaces the old DC-leaky
+// max(0, hbil - probe). .rgb = low-freq L0, .a = viewZ. Slot t34 (above cube_accum t33).
+Texture2D<float4> ssgi_hbil_lowfreq : register(t34);
 #endif
 
 // Stage 2' — DirectionToCube: mirrors cubemap_accumulate.hlsl line 70-95 so the
@@ -156,18 +163,30 @@ void apply_ao_ssgi_inline(
     // (that pass references the *previous* forward-pass geometry, so MV from the current
     // forward pass brings us to the matching sample).
     //
-    // Broken-MV guard: first-person hands/weapons double-count camera motion in
-    // compute_motion_vector (world_pos follows camera), producing absurdly large MVs that
-    // overshoot the reprojection. Fade to no-reprojection as |mv| grows past ~0.02 UV
-    // (~38 px at 1080p). Below that threshold, legitimate fast-pan dynamic motion passes
-    // through unaltered. Depth-reject below catches residual wrong-direction cases.
-    float  mv_len_sq = dot(motion_vector, motion_vector);
-    float  mv_scale  = 1.0f - saturate((mv_len_sq - 0.0004f) / 0.0005f);
-    float2 mv_used   = motion_vector * mv_scale;
+    // The broken first-person-weapon MV guard now lives at the SOURCE in
+    // compute_motion_vector() (motion_vectors.fx) — the MV we receive here is already
+    // weapon-suppressed, so we trust it unconditionally. The per-tap depth rejection below
+    // still rejects disoccluded neighbours. (Previously a depth-gated magnitude guard lived
+    // here; it was inverted — saturate(viewZ/3) applied MAX reprojection at the weapon and
+    // killed it at distance — causing the weapon offset + the near-camera warp band.)
+    // Phase-0 reprojection diagnosis (temporal/reproj overhaul). $reproj_scale (row-1 .y,
+    // Shift+F6) multiplies the MV: 1.0=normal, 0.0=no reproj, 0.5/1.5/2.0=over/under probes.
+    // Localizes stale-buffer vs wrong-MV-value. Diagnostic — fold away once root cause found.
+    float reproj_scale = ssgi_iniparams.Load(int2(1, 0)).y;
+    float2 mv_used = motion_vector * reproj_scale;
 
     const float2 viewport_size = float2(1920.0f, 1080.0f);
     float2 curr_uv    = (fragment_position + float2(0.5f, 0.5f)) / viewport_size;
     float2 reproj_uv  = curr_uv - mv_used;
+
+    // Phase-0 MV debug viz ($mv_debug = row-1 .z, Shift+F7). Per-pixel RAW MV as RG tint
+    // (x40): a horizontal pan should give smooth uniform RED scaling with 1/depth for
+    // translation (approx uniform for pure rotation). Zero/noisy/wrong-dir => the MV is the bug.
+    if (ssgi_iniparams.Load(int2(1, 0)).z > 0.5f)
+    {
+        diffuse_color = float3(abs(motion_vector.x) * 40.0f, abs(motion_vector.y) * 40.0f, 0.0f);
+        return;
+    }
 
     // Bilateral bilinear tap (4 Loads, depth-weighted). Integer-snap Load() snaps
     // fractional reproj_uv to the nearest pixel → per-frame stutter; manual bilinear kills
@@ -348,9 +367,33 @@ void apply_ao_ssgi_inline(
         float4 s01 = sss_buffer.Load(int3(sss_base + int2(0, 1), 0));
         float4 s11 = sss_buffer.Load(int3(sss_base + int2(1, 1), 0));
 
-        float4 sss_data = lerp(lerp(s00, s10, sss_frac.x),
-                               lerp(s01, s11, sss_frac.x),
-                               sss_frac.y);
+        // Per-tap depth rejection — matches AO/SSGI bilateral pattern above.
+        // Without this, disoccluded neighbours (e.g. background geometry at a different
+        // depth plane) bleed their SSS shadow scalar into the bilinear, causing visible
+        // jitter when the reprojected UV straddles a depth discontinuity.
+        float sss_wd0 = saturate(1.0f - abs(s00.b - curr_viewZ) / depth_scale) * step(0.001f, s00.b);
+        float sss_wd1 = saturate(1.0f - abs(s10.b - curr_viewZ) / depth_scale) * step(0.001f, s10.b);
+        float sss_wd2 = saturate(1.0f - abs(s01.b - curr_viewZ) / depth_scale) * step(0.001f, s01.b);
+        float sss_wd3 = saturate(1.0f - abs(s11.b - curr_viewZ) / depth_scale) * step(0.001f, s11.b);
+
+        // Combine bilinear fractional weights with depth similarity.
+        float  sss_w0 = (1.0f - sss_frac.x) * (1.0f - sss_frac.y) * sss_wd0;
+        float  sss_w1 = sss_frac.x          * (1.0f - sss_frac.y) * sss_wd1;
+        float  sss_w2 = (1.0f - sss_frac.x) * sss_frac.y         * sss_wd2;
+        float  sss_w3 = sss_frac.x          * sss_frac.y         * sss_wd3;
+        float  sss_ws = sss_w0 + sss_w1 + sss_w2 + sss_w3;
+
+        float4 sss_data;
+        if (sss_ws < 1e-4f)
+        {
+            // All neighbours rejected — neutral fallback: fully lit, sky sentinel.
+            sss_data = float4(1.0f, 0.0f, 0.001f, 0.0f);
+        }
+        else
+        {
+            float inv_sss_w = 1.0f / sss_ws;
+            sss_data = (s00 * sss_w0 + s10 * sss_w1 + s01 * sss_w2 + s11 * sss_w3) * inv_sss_w;
+        }
 
         if (sss_data.b > 0.001f)                        // viewZ sentinel — skip sky/unbound
             diffuse_color *= max(sss_data.r, 0.05f);
@@ -383,7 +426,12 @@ void apply_ao_ssgi_inline(
     // proper 16-ray Malley cosine sampling — no HBIL undersampling factor needed.
     // (The old 2.4 was a multiplier that over-amplified peak-facing-wall directional
     // bounce by ~2.7×, contributing to the "bounce ≈ direct" brightness issue.)
-    static const float k_dir = 0.9f;
+    // [Energy-accuracy rewrite, May 2026] k_dir = analytic clamped-cosine SH L1
+    // coefficient sqrt(3)/2 ~= 0.866 (was an empirical 0.9). gi_color STARTS as the
+    // HBIL reconstruction; the probe block below replaces it with the energy-correct
+    // compose (probe base + HBIL high-frequency detail). gi_color is reused as the
+    // single composed indirect-irradiance accumulator so downstream code is unchanged.
+    static const float k_dir = 0.866f;
     float3 gi_color;
     gi_color.r = max(0.0f, gi_s.r + k_dir * dot(l1_r, N_ws));
     gi_color.g = max(0.0f, gi_s.g + k_dir * dot(l1_g, N_ws));
@@ -438,13 +486,16 @@ void apply_ao_ssgi_inline(
     //
     // The strength is gated by $ssgi_sky_leak_strength (F5). Default 1.0.
     // -------------------------------------------------------------------------
+    // [May 2026] Single far-field directional term (renamed sky_contrib -> farfield_c;
+    // the strength multiply is moved to the add site below so it composes with the one
+    // intensity knob). This is the ONLY far-field source — the probe trace's cube-on-miss
+    // strength should be reduced so off-screen radiance is not double-counted.
     float  g_SSGISkyLeakStrength = max(ssgi_iniparams.Load(int2(2, 0)).x, 0.0f);
-    float3 sky_contrib = float3(0.0f, 0.0f, 0.0f);
+    float3 farfield_c = float3(0.0f, 0.0f, 0.0f);
     if (g_SSGISkyLeakStrength > 0.001f && have_bentN && ao_viewZ > 0.001f)
     {
-        float  visibility = saturate(dot(bentN_ws, N_ws));
-        float3 sky_rgb    = _AO_SampleCubeAccum(bentN_ws);
-        sky_contrib       = sky_rgb * (visibility * g_SSGISkyLeakStrength);
+        float visibility = saturate(dot(bentN_ws, N_ws));
+        farfield_c       = _AO_SampleCubeAccum(bentN_ws) * visibility;
     }
 
     // -------------------------------------------------------------------------
@@ -488,15 +539,35 @@ void apply_ao_ssgi_inline(
         float3 pL1g = (pL1g_00    * w.x + pL1g_10    * w.y + pL1g_01    * w.z + pL1g_11    * w.w) * inv_w;
         float3 pL1b = (pL1b_00    * w.x + pL1b_10    * w.y + pL1b_01    * w.z + pL1b_11    * w.w) * inv_w;
 
-        float3 probeGI;
-        probeGI.r = max(0.0f, pL0.r + k_dir * dot(pL1r, N_ws));
-        probeGI.g = max(0.0f, pL0.g + k_dir * dot(pL1g, N_ws));
-        probeGI.b = max(0.0f, pL0.b + k_dir * dot(pL1b, N_ws));
-        probeGI *= g_SSGIProbeStrength;
+        float3 probe_c;
+        probe_c.r = max(0.0f, pL0.r + k_dir * dot(pL1r, N_ws));
+        probe_c.g = max(0.0f, pL0.g + k_dir * dot(pL1g, N_ws));
+        probe_c.b = max(0.0f, pL0.b + k_dir * dot(pL1b, N_ws));
+        probe_c *= g_SSGIProbeStrength;
 
-        // Additive layering — HBIL sharp contact bounce + probe low-freq fill.
-        // Envelope clamp below caps runaway; dark receivers get full probe fill.
-        gi_color += probeGI;
+        // [Zero-DC corner-detail, June 2026] HBIL contributes ONLY its high-frequency
+        // residual over its OWN low-frequency band — a true self-high-pass, so flats stay
+        // constant brightness and only corners / contact gain contrast. This replaces the
+        // old DC-leaky `max(0, hbil*CALIB - probe)` (HBIL bitmask norm ≠ probe Malley norm,
+        // and the max() rectified a zero-mean signal → positive DC → brightened flats).
+        //   lowL0 = wide depth-aware blur of HBIL L0 (CustomShaderSSGIHBILLowFreq), sampled
+        //   with the SAME 2×2 bilateral as gi_s, so hp_L0 = bilateral(L0 - lowpass(L0)).
+        // The per-channel L0 residual carries the corner colour-bleed; the HBIL L1
+        // directional term is kept full ("L0-only high-pass" choice — HBIL L1 is ~0 on open
+        // flats and significant only near geometry, so its flat-area DC is negligible).
+        // probe_c stays the PRIMARY first bounce. $ssgi_detail_strength (x3, Ctrl+F5) scales
+        // it live. When the probe is off the whole block is skipped → gi_color stays full HBIL.
+        float  g_SSGIDetailStrength = max(ssgi_iniparams.Load(int2(3, 0)).x, 0.0f);
+        float3 lowL0 = (ssgi_hbil_lowfreq.Load(int3(pix00 + int2(0, 0), 0)).rgb * w.x
+                      + ssgi_hbil_lowfreq.Load(int3(pix00 + int2(1, 0), 0)).rgb * w.y
+                      + ssgi_hbil_lowfreq.Load(int3(pix00 + int2(0, 1), 0)).rgb * w.z
+                      + ssgi_hbil_lowfreq.Load(int3(pix00 + int2(1, 1), 0)).rgb * w.w) * inv_w;
+        float3 hp_L0 = gi_s.rgb - lowL0;
+        float3 detail_c;
+        detail_c.r = hp_L0.r + k_dir * dot(l1_r, N_ws);
+        detail_c.g = hp_L0.g + k_dir * dot(l1_g, N_ws);
+        detail_c.b = hp_L0.b + k_dir * dot(l1_b, N_ws);
+        gi_color = max(float3(0.0f, 0.0f, 0.0f), probe_c + g_SSGIDetailStrength * detail_c);
     }
 
     // Saturation boost — Halo 3 diffuse albedos are aggressively desaturated (2007 engine
@@ -506,9 +577,9 @@ void apply_ao_ssgi_inline(
     // 1.8 → 1.3 → 1.1: now that the Lambertian albedo multiply (below) does the real
     // chromaticity work via the BRDF, this extra lift only needs to nudge the low-chroma
     // Halo 3 palette. 1.1 is a gentle boost that doesn't fight the physical tint.
-    static const float gi_saturation = 1.1f;
-    float  gi_lum = dot(gi_color, float3(0.2126f, 0.7152f, 0.0722f));
-    gi_color = lerp(gi_lum.xxx, gi_color, gi_saturation);
+    // [June 2026 cleanup] gi_saturation chroma-expand removed (was a no-op lerp at 1.0
+    // since May 2026). Chromaticity is handled by the Lambertian albedo multiply below;
+    // use $ssgi_albedo_boost (F12) for deliberate artistic chroma.
     gi_color = max(gi_color, 0.0f);
 
     // ------------------------------------------------------------------------
@@ -551,14 +622,10 @@ void apply_ao_ssgi_inline(
     // adds a gentle final touch instead of re-shaping the curve. If Stage 1
     // in-game test shows post-trace GI looks flat, try raising this back to
     // 1.5–2.0 before touching the trace-side knee/full/boost.
-    static const float gi_lift_knee  = 0.3f;
-    static const float gi_lift_full  = 1.2f;
-    static const float gi_lift_boost = 1.0f;
-    {
-        float gi_lift_lum = dot(gi_color, float3(0.2126f, 0.7152f, 0.0722f));
-        float gi_lift_t   = smoothstep(gi_lift_knee, gi_lift_full, gi_lift_lum);
-        gi_color *= (1.0f + gi_lift_t * gi_lift_boost);
-    }
+    // [June 2026 cleanup] The consumer-side contrast-lift code here was a no-op
+    // (boost=0 since May 2026) and has been removed. $ssgi_intensity is the single
+    // linear knob; any per-sample non-linear lift now lives in the trace shaders.
+    // The rationale comment above is kept for history.
 
     // Consumer gain — 0.5 → 0.8 to compensate for higher dynamic range after the
     // lift above (dim bounce sits at the same level as before; bright bounce is
@@ -569,8 +636,11 @@ void apply_ao_ssgi_inline(
     // Phase F1a — $ssgi_intensity runtime knob (Lumen IndirectLightingIntensity equivalent).
     // Default 1.0 → net 0.8× intrinsic. F6 cycles [0.5, 1.0, 1.5, 2.0, 3.0] for A/B tuning.
     // max() guards against accidental negative / NaN from an unbound IniParams slot.
+    // [May 2026] Removed the 0.8 compensating gain. $ssgi_intensity is now the SINGLE
+    // linear knob; 1.0 = physically balanced (probe L0 is irradiance/pi from Malley
+    // (1/N)Sum, and the albedo multiply below uses the engine's no-/pi convention).
     float g_SSGIIntensity = max(ssgi_iniparams.Load(int2(4, 0)).x, 0.0f);
-    gi_color *= 0.8f * g_SSGIIntensity;
+    gi_color *= g_SSGIIntensity;
 
     // Lambertian BRDF integration — multiply the incoming indirect irradiance
     // `gi_color` by the receiver albedo to get outgoing diffuse radiance. This
@@ -640,11 +710,16 @@ void apply_ao_ssgi_inline(
     // Paired with Pass 1's narrower lift knee (trace-side) so that ambient
     // bounce stays quiet while emitter bounce is both pre-lifted AND allowed
     // to land unclamped at the consumer.
-    float gi_raw_lum = dot(gi_contrib, float3(0.2126f, 0.7152f, 0.0722f));
-    float hot_relax  = saturate((gi_raw_lum - 1.0f) * 0.5f);
-    float env_scale  = lerp(2.0f, 10.0f, hot_relax);
-    float3 envelope  = diffuse_color * env_scale + 0.1f * ao_multi;
-    gi_contrib = min(gi_contrib, envelope);
+    // [May 2026] Replaced the 2x->10x "hot-relax" envelope (a brightness-shaper that
+    // existed to fight the double-count) with a pure high firefly/NaN guard. The energy
+    // is correct now, so this only catches runaway temporal/feedback fireflies and never
+    // touches normal-range bounce (post-exposure indirect sits ~0-3). Chroma preserved.
+    {
+        float gi_ff_lum = dot(gi_contrib, float3(0.2126f, 0.7152f, 0.0722f));
+        const float FIREFLY_CEILING = 12.0f;
+        if (gi_ff_lum > FIREFLY_CEILING) gi_contrib *= FIREFLY_CEILING / gi_ff_lum;
+        if (any(isnan(gi_contrib)) || any(isinf(gi_contrib))) gi_contrib = float3(0.0f, 0.0f, 0.0f);
+    }
     diffuse_color += gi_contrib;
 
     // -------------------------------------------------------------------------
@@ -667,7 +742,12 @@ void apply_ao_ssgi_inline(
     // with the main gi_contrib path. Scale by g_SSGIIntensity so the F6
     // master knob also governs sky-leak (sky-leak has its own F5 sub-knob
     // for A/B tuning via g_SSGISkyLeakStrength baked into sky_contrib).
-    diffuse_color += sky_contrib * albedo_color * ao_multi * g_SSGIIntensity;
+    // [May 2026] Single far-field term (farfield_c), scaled by sky-leak strength (F5) and
+    // the single intensity knob, then the Lambertian albedo*ao_multi. Kept as a separate
+    // additive term (it is cached DC irradiance, not a firefly source, so it skips the
+    // firefly clamp above). This is the only off-screen-radiance add — the probe's
+    // cube-on-miss should be reduced to avoid double-counting far-field.
+    diffuse_color += g_SSGISkyLeakStrength * farfield_c * albedo_color * ao_multi * g_SSGIIntensity;
 #endif  // HALOGRAM_SHADER
 }
 

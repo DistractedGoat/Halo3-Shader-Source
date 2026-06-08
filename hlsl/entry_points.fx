@@ -545,7 +545,7 @@ struct static_per_pixel_vsout
 	float4 misc						: TEXCOORD9;
 #endif
 #ifdef ACCUM_PIXEL_HAS_MV
-	float2 motion_vector				: TEXCOORD10;
+	noperspective float2 motion_vector				: TEXCOORD10;
 #endif
 };
 
@@ -693,7 +693,7 @@ struct static_sh_vsout
 	float4 misc						: TEXCOORD9;
 #endif
 #ifdef ACCUM_PIXEL_HAS_MV
-	float2 motion_vector				: TEXCOORD10;
+	noperspective float2 motion_vector				: TEXCOORD10;
 #endif
 };
 
@@ -836,7 +836,7 @@ struct static_per_vertex_vsout
 	float4 misc						: TEXCOORD9;
 #endif
 #ifdef ACCUM_PIXEL_HAS_MV
-	float2 motion_vector				: TEXCOORD10;
+	noperspective float2 motion_vector				: TEXCOORD10;
 #endif
 };
 
@@ -1011,7 +1011,7 @@ struct static_per_vertex_color_vsout
 	float4 misc						: TEXCOORD9;
 #endif
 #ifdef ACCUM_PIXEL_HAS_MV
-	float2 motion_vector				: TEXCOORD10;
+	noperspective float2 motion_vector				: TEXCOORD10;
 #endif
 };
 
@@ -1172,7 +1172,7 @@ struct static_prt_vsout
 	float4 misc						: TEXCOORD9;
 #endif
 #ifdef ACCUM_PIXEL_HAS_MV
-	float2 motion_vector				: TEXCOORD10;
+	noperspective float2 motion_vector				: TEXCOORD10;
 #endif
 };
 
@@ -1509,7 +1509,7 @@ struct dynamic_light_vsout
 	float4 misc									: TEXCOORD9;
 #endif
 #ifdef ACCUM_PIXEL_HAS_MV
-	float2 motion_vector				: TEXCOORD10;
+	noperspective float2 motion_vector				: TEXCOORD10;
 #endif
 };
 
@@ -1756,7 +1756,7 @@ struct lightmap_debug_mode_vsout
 	float4 misc						: TEXCOORD9;
 #endif
 #ifdef ACCUM_PIXEL_HAS_MV
-	float2 motion_vector				: TEXCOORD10;
+	noperspective float2 motion_vector				: TEXCOORD10;
 #endif
 };
 
