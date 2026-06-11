@@ -38,11 +38,20 @@ float2 compute_motion_vector(float4 current_position, float3 world_position)
 	//   - Gate on depth (weapon range) AND magnitude (only LARGE MVs) so legitimate
 	//     near-geometry motion is left untouched; the per-tap depth rejection in the consumers
 	//     handles disocclusions.
-	// PLATEAU: full kill for w < 2 (covers the whole weapon/hands depth range → matches the
-	// pre-regression behaviour that fully zeroed the weapon MV), smoothly off by w = 3 so
-	// distant geometry keeps full reprojection (a fast pan must not freeze distant effects).
-	float fp_kill = 1.0f - smoothstep(2.0f, 3.0f, current_position.w);
-	mv *= (1.0f - fp_kill * saturate((dot(mv, mv) - 0.0004f) / 0.0005f));
+	// BAND (June 10 2026, widened 0.12/0.30 → 0.30/0.45): the AR forend during the walk-bob
+	// animation crosses w=0.12 (visible as a green |mv.y| patch in the Shift+F7 $mv_debug
+	// overlay — weapon-bob MV leaking through the partial band); a single-pose depth-stencil
+	// dump (docs/research/depth-stencil-weapon-mask.md) had shown weapon w ≤ 0.09, but that
+	// underestimates animated poses and larger weapons. Nearest WORLD geometry measured in the
+	// same dump: w = 0.52 standing (floor at bottom screen edge ~1.55 with a level camera;
+	// crouch/slopes bring it lower). smoothstep(0.30, 0.45): weapon (w<0.30) fully killed,
+	// world (w>0.45) keeps its full MV — still below the 0.52 world floor. Do NOT push the
+	// upper edge past ~0.5: crouched/sloped ground would lose its MV (lag-smear at the feet),
+	// the original failure of the old smoothstep(2,3) band, which was 30-100× too wide.
+	// KEEP IN SYNC: the compute temporals' killed-MV fallback gate (currViewZ > 0.45 in
+	// temporal_reproject_ao / ssgi_temporal / sss_temporal) must equal the upper band edge,
+	// else killed weapon pixels in the band get camera-reprojected → long history trails.
+	mv *= smoothstep(0.30f, 0.45f, current_position.w);
 	return mv;
 }
 #endif // ACCUM_PIXEL_HAS_MV

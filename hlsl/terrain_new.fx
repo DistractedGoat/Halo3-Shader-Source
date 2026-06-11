@@ -935,7 +935,8 @@ accum_pixel static_lighting_shared_ps_quadratic(
 	out_color.rgb= albedo.rgb * (diffuse_light + simple_light_diffuse_light) * diffuse_coefficient;
 
 	// halo3-ng: forward-integrated AO/SSGI (diffuse-only; specular added after, no AO).
-	apply_ao_ssgi_inline(out_color.rgb, albedo.rgb, bump_normal, fragment_position.xy, motion_vector, raw_depth);
+	apply_ao_ssgi_inline(out_color.rgb, albedo.rgb, bump_normal, fragment_position.xy, motion_vector, raw_depth,
+		fragment_position_world);
 
 	// specular light
 	#if SPECULAR_MATERIAL_COUNT > 0
@@ -1113,7 +1114,8 @@ accum_pixel static_lighting_shared_ps_linear_with_dominant_light(
 	out_color.rgb= albedo.rgb * (diffuse_light + simple_light_diffuse_light) * diffuse_coefficient;
 
 	// halo3-ng: forward-integrated AO/SSGI (diffuse-only; specular added after, no AO).
-	apply_ao_ssgi_inline(out_color.rgb, albedo.rgb, bump_normal, fragment_position.xy, motion_vector, raw_depth);
+	apply_ao_ssgi_inline(out_color.rgb, albedo.rgb, bump_normal, fragment_position.xy, motion_vector, raw_depth,
+		fragment_position_world);
 
 	// specular light
 	#if SPECULAR_MATERIAL_COUNT > 0

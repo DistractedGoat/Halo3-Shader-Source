@@ -420,7 +420,8 @@ default_ps(
 	}
 #endif
 	float3 diffuse_lit = texcoord.rgb * light.rgb;
-	apply_ao_ssgi_inline(diffuse_lit, texcoord.rgb, normal, screen_position.xy, decorator_mv, screen_position.z);
+	apply_ao_ssgi_inline(diffuse_lit, texcoord.rgb, normal, screen_position.xy, decorator_mv, screen_position.z,
+		world_position);
 	float4 color = float4(diffuse_lit + inscatter.rgb, texcoord.a);
 
 #if DX_VERSION == 11

@@ -320,7 +320,8 @@ float4 calc_output_color_with_explicit_light_quadratic(
 	// halo3-ng: forward-integrated AO/SSGI — diffuse-only.
 	// Specular/envmap/self_illum bypass AO (future phase: bent-normal specular occlusion).
 	float3 diffuse_contribution = diffuse_radiance * albedo.xyz;
-	apply_ao_ssgi_inline(diffuse_contribution, albedo.xyz, bump_normal, fragment_position, motion_vector, raw_depth);
+	apply_ao_ssgi_inline(diffuse_contribution, albedo.xyz, bump_normal, fragment_position, motion_vector, raw_depth,
+		Camera_Position_PS - fragment_to_camera_world);
 	out_color.xyz= (diffuse_contribution + specular_radiance + self_illum_radiance + envmap_radiance);
 	APPLY_OVERLAYS(out_color.xyz, texcoord, view_dot_normal)
 	out_color.xyz= (out_color.xyz * extinction + inscatter * BLEND_FOG_INSCATTER_SCALE) * g_exposure.rrr;
@@ -519,7 +520,8 @@ float4 calc_output_color_with_explicit_light_linear_with_dominant_light(
 #else
 	// halo3-ng: forward-integrated AO/SSGI — diffuse-only.
 	float3 diffuse_contribution = diffuse_radiance * albedo.xyz;
-	apply_ao_ssgi_inline(diffuse_contribution, albedo.xyz, bump_normal, fragment_position, motion_vector, raw_depth);
+	apply_ao_ssgi_inline(diffuse_contribution, albedo.xyz, bump_normal, fragment_position, motion_vector, raw_depth,
+		Camera_Position_PS - fragment_to_camera_world);
 	out_color.xyz= (diffuse_contribution + specular_radiance + self_illum_radiance + envmap_radiance);
 	APPLY_OVERLAYS(out_color.xyz, texcoord, view_dot_normal)
 	out_color.xyz= (out_color.xyz * extinction + inscatter * BLEND_FOG_INSCATTER_SCALE) * g_exposure.rrr;

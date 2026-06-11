@@ -3,7 +3,8 @@
 
 // halo3-ng: forward-integrated AO/SSGI inputs (bound via [ShaderRegexBindAOSSGI] in d3dx.ini).
 // ao_ssgi_buffer: .rg=oct(bentN_ws) .b=AO .a=viewZ (sentinel: a<=0 -> sky/uninitialised -> AO=1)
-// gi_buffer:      .rgb=GI (pre-exposure) .a=viewZ
+// gi_buffer:      .rgb=GI (POST-exposure — sourced from g_HDRScene; divided by g_exposure.r
+//                 at the compose site before the caller's final exposure multiply) .a=viewZ
 // Slots t21/t22 — chosen above all known allocations:
 //   t0-~t10  : fxc auto-allocated PARAM_SAMPLER_2D (material samplers + cubes)
 //   t13-t18  : engine globals (hlsl_constant_persist.fx: lightprobe, dom_light, scene_ldr, albedo, normal, depth)
@@ -82,6 +83,16 @@ Texture2D<float4> cube_accum : register(t33);
 // local contrast (corners / contact bleed) survives — replaces the old DC-leaky
 // max(0, hbil - probe). .rgb = low-freq L0, .a = viewZ. Slot t34 (above cube_accum t33).
 Texture2D<float4> ssgi_hbil_lowfreq : register(t34);
+
+// Frame-consistent depth rejection (June 2026 "sheen" fix): previous frame's VP matrix
+// (ResourcePrevVPTexture, 4×1 rows — same texture decorators read at t23 and water at t20).
+// The AO/GI/SSS buffers' stored viewZ was recorded by the compute chain at the END of the
+// PREVIOUS frame, i.e. in prev-frame view space. Comparing it against curr_viewZ made the
+// bilateral depth test fail along the iso-depth contour z ≈ 10·v·dt under camera translation
+// → a graded bright/dark band ("sheen") sliding with velocity and rotating with the camera.
+// expectedPrevZ = world_position projected through THIS matrix puts both sides of the test
+// in prev-frame view space → valid under arbitrary camera motion (ssgi_pixel_temporal idiom).
+Texture2D<float4> prev_vp_ao : register(t35);
 #endif
 
 // Stage 2' — DirectionToCube: mirrors cubemap_accumulate.hlsl line 70-95 so the
@@ -147,13 +158,21 @@ float3 _AO_SampleCubeAccum(float3 worldDir)
 //   raw_depth        : SV_Position.z (raw [0..1] reverse-Z) — linearized to viewZ and used
 //                      as bilateral weight against ao_s.a / gi_s.a (prev-frame viewZ) to
 //                      reject disoccluded neighbors (weapon/background silhouettes).
+//   world_position   : fragment world-space position (Camera_Position_PS −
+//                      fragment_to_camera_world at the entry_points/terrain call sites;
+//                      decorators pass their interpolated world_position directly). Used to
+//                      compute expectedPrevZ (this point's viewZ in the PREVIOUS frame's
+//                      view space) for the frame-consistent bilateral depth test. Pass
+//                      float3(0,0,0) when unavailable — falls back to curr_viewZ reference
+//                      (the legacy behaviour, banded under camera translation).
 void apply_ao_ssgi_inline(
     inout float3 diffuse_color,
     in float3 albedo_color,
     in float3 surface_normal,
     in float2 fragment_position,
     in float2 motion_vector,
-    in float  raw_depth)
+    in float  raw_depth,
+    in float3 world_position)
 {
 #ifdef HALOGRAM_SHADER
     // No-op for halograms: volumetric/additive surfaces don't receive screen-space AO/GI.
@@ -223,26 +242,93 @@ void apply_ao_ssgi_inline(
     float curr_viewZ  = 0.00781f / max(raw_depth, 1e-6f);
     float depth_scale = max(curr_viewZ * 0.1f, 0.05f);
 
+    // Frame-consistent reference depth ("sheen" fix, June 2026). The taps' .a viewZ was
+    // recorded by the compute chain at the end of the PREVIOUS frame (prev view space);
+    // comparing against curr_viewZ (current view space) made the test fail along the
+    // iso-depth contour z ≈ 10·v·dt under translation — a graded bright/dark band sliding
+    // with movement speed and rotating with the camera. Project this fragment's world
+    // position through the previous frame's VP instead (decorator/water prev-VP pattern;
+    // expectedPrevZ idiom from ssgi_pixel_temporal.hlsl).
+    float expectedPrevZ = curr_viewZ;   // fallback: no prev VP yet / no world_position
+    {
+        float4 pv_r0 = prev_vp_ao.Load(int3(0, 0, 0));
+        if ((pv_r0.x != 0.0f || pv_r0.y != 0.0f || pv_r0.z != 0.0f || pv_r0.w != 0.0f)
+            && dot(world_position, world_position) > 1e-8f)
+        {
+            float4x4 pv_mat = float4x4(
+                pv_r0,
+                prev_vp_ao.Load(int3(1, 0, 0)),
+                prev_vp_ao.Load(int3(2, 0, 0)),
+                prev_vp_ao.Load(int3(3, 0, 0)));
+            float4 pv_clip = mul(float4(world_position, 1.0f), pv_mat);
+            if (pv_clip.w > 1e-6f)
+            {
+                float pv_rawD = pv_clip.z / pv_clip.w;
+                if (pv_rawD > 1e-5f)
+                {
+                    float pv_z = 0.00781f / pv_rawD;
+                    // Sanity: the camera cannot translate >50% of viewZ in one frame —
+                    // a larger delta means a stale/garbage matrix or bad world_position.
+                    if (abs(pv_z - curr_viewZ) < 0.5f * curr_viewZ)
+                        expectedPrevZ = pv_z;
+                }
+            }
+        }
+    }
+
     float4 wb;  // bilinear weights
     wb.x = (1.0f - frac.x) * (1.0f - frac.y);
     wb.y = frac.x          * (1.0f - frac.y);
     wb.z = (1.0f - frac.x) * frac.y;
     wb.w = frac.x          * frac.y;
 
-    float4 wd;  // depth similarity (0 on sky sentinel ao.a<=0)
-    wd.x = saturate(1.0f - abs(ao00.a - curr_viewZ) / depth_scale) * step(0.001f, ao00.a);
-    wd.y = saturate(1.0f - abs(ao10.a - curr_viewZ) / depth_scale) * step(0.001f, ao10.a);
-    wd.z = saturate(1.0f - abs(ao01.a - curr_viewZ) / depth_scale) * step(0.001f, ao01.a);
-    wd.w = saturate(1.0f - abs(ao11.a - curr_viewZ) / depth_scale) * step(0.001f, ao11.a);
+    float4 wd;  // depth similarity vs expectedPrevZ (0 on sky sentinel ao.a<=0)
+    wd.x = saturate(1.0f - abs(ao00.a - expectedPrevZ) / depth_scale) * step(0.001f, ao00.a);
+    wd.y = saturate(1.0f - abs(ao10.a - expectedPrevZ) / depth_scale) * step(0.001f, ao10.a);
+    wd.z = saturate(1.0f - abs(ao01.a - expectedPrevZ) / depth_scale) * step(0.001f, ao01.a);
+    wd.w = saturate(1.0f - abs(ao11.a - expectedPrevZ) / depth_scale) * step(0.001f, ao11.a);
 
     float4 w    = wb * wd;
     float  wsum = dot(w, 1.0f.xxxx);
 
+    // Disocclusion handling. `da_*` locals are prefixed to avoid colliding with the probe
+    // block's later inv_w/wsum reuse and to dodge intrinsic shadowing. The weighted average is
+    // always computed (cheap) so both the legacy cliff and the smooth fade share it.
+    float  da_mode  = ssgi_iniparams.Load(int2(1, 0)).w;   // $disocc_mode (Shift+F8): 0=legacy hard cliff, 1=smooth fade
+    float  da_inv_w = 1.0f / max(wsum, 1e-4f);
+    float4 da_ao    = (ao00 * w.x + ao10 * w.y + ao01 * w.z + ao11 * w.w) * da_inv_w;
+    float4 da_gi    = (gi00 * w.x + gi10 * w.y + gi01 * w.z + gi11 * w.w) * da_inv_w;
+    float3 da_l1r   = (gdr00 * w.x + gdr10 * w.y + gdr01 * w.z + gdr11 * w.w) * da_inv_w;
+    float3 da_l1g   = (gdg00 * w.x + gdg10 * w.y + gdg01 * w.z + gdg11 * w.w) * da_inv_w;
+    float3 da_l1b   = (gdb00 * w.x + gdb10 * w.y + gdb01 * w.z + gdb11 * w.w) * da_inv_w;
+
     float4 ao_s, gi_s;
     float3 l1_r, l1_g, l1_b;
-    if (wsum < 1e-4f)
+    // da_conf is hoisted to function scope: the bent-normal decode, cavity kick, sky-leak,
+    // and detail high-pass below must ALL be confidence-gated. The original smooth-fade
+    // implementation faded only ao_s/gi_s — at conf→0, ao_s.rg→(0,0) octahedral-decodes
+    // to WORLD UP with ao_s.a=curr_viewZ passing the validity gate, so the cavity kick gave
+    // walls/ceilings a spurious ~50% darkening exactly at reveals (the disocclusion smear).
+    float da_conf = 1.0f;
+    if (da_mode > 0.5f)
     {
-        // All neighbors rejected (disocclusion or full sky). Neutral fallback: AO=1, GI=0.
+        // Smooth disocclusion fade. confidence = accepted bilateral weight: the bilinear
+        // weights sum to 1 and the depth weights are <=1, so wsum in [0,1]. At a disocclusion
+        // all taps are depth-rejected → wsum→0 → the effect fades smoothly toward neutral
+        // (AO=1, GI=0) instead of snapping to a hard 1-frame neutral hole trailing moving
+        // edges. curr_viewZ kept in .a so the downstream valid-gate (ao_s.a > 0.001) passes
+        // and applies the faded AO.
+        da_conf = saturate(wsum);
+        ao_s = float4(lerp(float3(0.0f, 0.0f, 1.0f), da_ao.rgb, da_conf), curr_viewZ);
+        gi_s = float4(da_gi.rgb * da_conf, curr_viewZ);
+        l1_r = da_l1r * da_conf;
+        l1_g = da_l1g * da_conf;
+        l1_b = da_l1b * da_conf;
+    }
+    else if (wsum < 1e-4f)
+    {
+        // Legacy hard cliff (A/B reference). Neutral: AO=1, GI=0.
+        da_conf = 0.0f;
         ao_s = float4(0.0f, 0.0f, 1.0f, 0.001f);
         gi_s = float4(0.0f, 0.0f, 0.0f, 0.001f);
         l1_r = float3(0.0f, 0.0f, 0.0f);
@@ -251,12 +337,8 @@ void apply_ao_ssgi_inline(
     }
     else
     {
-        float inv_w = 1.0f / wsum;
-        ao_s = (ao00 * w.x + ao10 * w.y + ao01 * w.z + ao11 * w.w) * inv_w;
-        gi_s = (gi00 * w.x + gi10 * w.y + gi01 * w.z + gi11 * w.w) * inv_w;
-        l1_r = (gdr00 * w.x + gdr10 * w.y + gdr01 * w.z + gdr11 * w.w) * inv_w;
-        l1_g = (gdg00 * w.x + gdg10 * w.y + gdg01 * w.z + gdg11 * w.w) * inv_w;
-        l1_b = (gdb00 * w.x + gdb10 * w.y + gdb01 * w.z + gdb11 * w.w) * inv_w;
+        ao_s = da_ao; gi_s = da_gi;
+        l1_r = da_l1r; l1_g = da_l1g; l1_b = da_l1b;
     }
 
     float ao_viewZ = ao_s.a;
@@ -269,7 +351,9 @@ void apply_ao_ssgi_inline(
     // (bentNormal_ws = ViewCSToWorldNormal(bentNormal_vs) → octahedral encode).
     float3 bentN_ws = float3(0.0f, 0.0f, 1.0f);  // neutral fallback on sky sentinel
     bool   have_bentN = false;
-    if (ao_viewZ > 0.001f)
+    // da_conf gate: at low confidence ao_s.rg is faded toward (0,0), which decodes to a
+    // meaningless world-up vector — don't let the cavity kick / sky-leak consume it.
+    if (ao_viewZ > 0.001f && da_conf > 0.05f)
     {
         float2 e = ao_s.rg;
         bentN_ws = float3(e.x, e.y, 1.0f - abs(e.x) - abs(e.y));
@@ -294,6 +378,9 @@ void apply_ao_ssgi_inline(
             float3 N_ws = surface_normal * rsqrt(nLen2);
             float  tilt = saturate(dot(bentN_ws, N_ws));
             float  ao_bn = lerp(0.5f, 1.0f, pow(tilt, 2.0f));
+            // Fade the kick toward neutral (1.0) with disocclusion confidence — a partially
+            // faded bent normal must not darken the surface it points away from.
+            ao_bn = lerp(1.0f, ao_bn, da_conf);
             ao_effective = saturate(ao * ao_bn);
         }
     }
@@ -371,10 +458,12 @@ void apply_ao_ssgi_inline(
         // Without this, disoccluded neighbours (e.g. background geometry at a different
         // depth plane) bleed their SSS shadow scalar into the bilinear, causing visible
         // jitter when the reprojected UV straddles a depth discontinuity.
-        float sss_wd0 = saturate(1.0f - abs(s00.b - curr_viewZ) / depth_scale) * step(0.001f, s00.b);
-        float sss_wd1 = saturate(1.0f - abs(s10.b - curr_viewZ) / depth_scale) * step(0.001f, s10.b);
-        float sss_wd2 = saturate(1.0f - abs(s01.b - curr_viewZ) / depth_scale) * step(0.001f, s01.b);
-        float sss_wd3 = saturate(1.0f - abs(s11.b - curr_viewZ) / depth_scale) * step(0.001f, s11.b);
+        // Reference is expectedPrevZ (NOT curr_viewZ): the SSS buffer's .b viewZ is
+        // prev-frame view space — same "sheen" band fix as the AO/GI bilateral above.
+        float sss_wd0 = saturate(1.0f - abs(s00.b - expectedPrevZ) / depth_scale) * step(0.001f, s00.b);
+        float sss_wd1 = saturate(1.0f - abs(s10.b - expectedPrevZ) / depth_scale) * step(0.001f, s10.b);
+        float sss_wd2 = saturate(1.0f - abs(s01.b - expectedPrevZ) / depth_scale) * step(0.001f, s01.b);
+        float sss_wd3 = saturate(1.0f - abs(s11.b - expectedPrevZ) / depth_scale) * step(0.001f, s11.b);
 
         // Combine bilinear fractional weights with depth similarity.
         float  sss_w0 = (1.0f - sss_frac.x) * (1.0f - sss_frac.y) * sss_wd0;
@@ -495,7 +584,9 @@ void apply_ao_ssgi_inline(
     if (g_SSGISkyLeakStrength > 0.001f && have_bentN && ao_viewZ > 0.001f)
     {
         float visibility = saturate(dot(bentN_ws, N_ws));
-        farfield_c       = _AO_SampleCubeAccum(bentN_ws) * visibility;
+        // da_conf: at reveals the probe GI fades to 0 — the far-field must fade with it,
+        // not pop in along a half-faded bent normal (sky-coloured flash on floors).
+        farfield_c       = _AO_SampleCubeAccum(bentN_ws) * visibility * da_conf;
     }
 
     // -------------------------------------------------------------------------
@@ -562,12 +653,17 @@ void apply_ao_ssgi_inline(
                       + ssgi_hbil_lowfreq.Load(int3(pix00 + int2(1, 0), 0)).rgb * w.y
                       + ssgi_hbil_lowfreq.Load(int3(pix00 + int2(0, 1), 0)).rgb * w.z
                       + ssgi_hbil_lowfreq.Load(int3(pix00 + int2(1, 1), 0)).rgb * w.w) * inv_w;
-        float3 hp_L0 = gi_s.rgb - lowL0;
+        // Build the high-pass from the UNFADED averages (da_gi / da_l1*), then apply
+        // disocclusion confidence to the WHOLE detail term. Using the conf-faded gi_s
+        // against the unfaded lowL0 made hp_L0 = conf·L0 − lowpass(L0) go NEGATIVE at
+        // partial disocclusions — a second dark-halo source trailing moving edges,
+        // breaking the zero-mean property this high-pass exists for.
+        float3 hp_L0 = da_gi.rgb - lowL0;
         float3 detail_c;
-        detail_c.r = hp_L0.r + k_dir * dot(l1_r, N_ws);
-        detail_c.g = hp_L0.g + k_dir * dot(l1_g, N_ws);
-        detail_c.b = hp_L0.b + k_dir * dot(l1_b, N_ws);
-        gi_color = max(float3(0.0f, 0.0f, 0.0f), probe_c + g_SSGIDetailStrength * detail_c);
+        detail_c.r = hp_L0.r + k_dir * dot(da_l1r, N_ws);
+        detail_c.g = hp_L0.g + k_dir * dot(da_l1g, N_ws);
+        detail_c.b = hp_L0.b + k_dir * dot(da_l1b, N_ws);
+        gi_color = max(float3(0.0f, 0.0f, 0.0f), probe_c + g_SSGIDetailStrength * da_conf * detail_c);
     }
 
     // Saturation boost — Halo 3 diffuse albedos are aggressively desaturated (2007 engine
@@ -640,7 +736,21 @@ void apply_ao_ssgi_inline(
     // linear knob; 1.0 = physically balanced (probe L0 is irradiance/pi from Malley
     // (1/N)Sum, and the albedo multiply below uses the engine's no-/pi convention).
     float g_SSGIIntensity = max(ssgi_iniparams.Load(int2(4, 0)).x, 0.0f);
-    gi_color *= g_SSGIIntensity;
+
+    // EXPOSURE-SPACE CORRECTION (June 11 2026 — the "look at sky → scene blows out" fix).
+    // Every GI source (probe + HBIL via g_HDRScene, far-field via the cube that accumulates
+    // g_HDRScene) is POST-EXPOSURE; this function adds into diffuse_color BEFORE the caller's
+    // final `* g_exposure.rrr` → without this divide the GI is exposure-applied TWICE
+    // (∝ exposure²). In dark scenes Halo's eye-adaption gain is high → GI/sky-leak massively
+    // over-contributes (the "metallic leaves" ambient sheen); exposure swings (glance at the
+    // bright sky → adaption dips → look back) propagate through the GI temporal lag as
+    // transient blow-outs / "stale ambient". Same convention as the SSR consumers
+    // (apply_ssr_blend: `ssr_raw = ibr.rgb / g_exposure.r`; water_shading ssr_pre_exposure).
+    // Buffers lag exposure by the temporal time constants (~0.25-1s) — brief mismatch during
+    // swings, converges; infinitely better than the squared error.
+    float inv_exposure = 1.0f / max(g_exposure.r, 1e-4f);
+
+    gi_color *= g_SSGIIntensity * inv_exposure;
 
     // Lambertian BRDF integration — multiply the incoming indirect irradiance
     // `gi_color` by the receiver albedo to get outgoing diffuse radiance. This
@@ -747,7 +857,10 @@ void apply_ao_ssgi_inline(
     // additive term (it is cached DC irradiance, not a firefly source, so it skips the
     // firefly clamp above). This is the only off-screen-radiance add — the probe's
     // cube-on-miss should be reduced to avoid double-counting far-field.
-    diffuse_color += g_SSGISkyLeakStrength * farfield_c * albedo_color * ao_multi * g_SSGIIntensity;
+    // inv_exposure: the cube stores post-exposure radiance — same exposure-space
+    // correction as gi_color above (without it, sky-leak is exposure² and the bright-sky
+    // cube texels paint over-amplified patches onto upward bent normals in dark scenes).
+    diffuse_color += g_SSGISkyLeakStrength * farfield_c * albedo_color * ao_multi * g_SSGIIntensity * inv_exposure;
 #endif  // HALOGRAM_SHADER
 }
 

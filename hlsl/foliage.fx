@@ -235,6 +235,10 @@ struct static_common_vsout
 	// halo3-ng: world-space vertex normal for directional SSGI reconstruction
 	// (foliage has no per-pixel bump — carries the VS input normal to the PS).
 	float3 world_normal				: TEXCOORD11;
+	// halo3-ng: camera→fragment offset for the consumer's frame-consistent depth test
+	// (expectedPrevZ — see ao_ssgi_inline.fx). Engine idiom: camera-relative for precision;
+	// PS reconstructs world pos as Camera_Position_PS - fragment_to_camera_world.
+	float3 fragment_to_camera_world	: TEXCOORD12;
 };
 
 static_common_vsout static_common_vs(
@@ -268,7 +272,10 @@ static_common_vsout static_common_vs(
 	vsout.lighting = ravi_order_3(normal, sh_lighting_coefficients);
 	
 	compute_scattering(Camera_Position, vertex.position, vsout.extinction, vsout.inscatter);
-	
+
+	// halo3-ng: same post-deform world position compute_scattering/compute_motion_vector use.
+	vsout.fragment_to_camera_world = Camera_Position - vertex.position;
+
 	vsout.clip_distance = dot(vsout.position, v_clip_plane);
 
 #ifdef ACCUM_PIXEL_HAS_MV
@@ -301,7 +308,8 @@ accum_pixel static_common_ps(
 #ifdef ACCUM_PIXEL_HAS_MV
 	foliage_mv = vsout.motion_vector;
 #endif
-	apply_ao_ssgi_inline(diffuse_lit, albedo.xyz, vsout.world_normal, vsout.position.xy, foliage_mv, vsout.position.z);
+	apply_ao_ssgi_inline(diffuse_lit, albedo.xyz, vsout.world_normal, vsout.position.xy, foliage_mv, vsout.position.z,
+		Camera_Position_PS - vsout.fragment_to_camera_world);
 
 	out_color.xyz = (diffuse_lit * vsout.extinction + vsout.inscatter * BLEND_FOG_INSCATTER_SCALE) * g_exposure.rrr;
 	out_color.w= 0.0f;
@@ -455,6 +463,9 @@ static_common_vsout static_per_vertex_vs(
 	vsout.lighting = ravi_order_2_with_dominant_light(normal, lighting_constants, dominant_light_direction, dominant_light_intensity);
 	
 	compute_scattering(Camera_Position, vertex.position, vsout.extinction, vsout.inscatter);
+
+	// halo3-ng: camera→fragment for the consumer's expectedPrevZ (matches static_common_vs).
+	vsout.fragment_to_camera_world = Camera_Position - vertex.position;
 
 	vsout.clip_distance = dot(vsout.position, v_clip_plane);
 
