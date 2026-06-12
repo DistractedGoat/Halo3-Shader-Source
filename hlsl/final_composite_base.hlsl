@@ -176,7 +176,7 @@ float3 agx_tonemap(float3 col, float punch)
 	if (punch > 1e-4f)							// optional Punchy-style look
 	{
 		float luma  = dot(val, float3(0.2126f, 0.7152f, 0.0722f));
-		float powv  = 1.0f + 0.35f * punch;		// contrast
+		float powv  = 1.0f + 0.2f * punch;		// contrast was 0.34f
 		float satv  = 1.0f + 0.40f * punch;		// saturation
 		val = pow(max(val, 0.0f), powv);
 		val = luma + satv * (val - luma);

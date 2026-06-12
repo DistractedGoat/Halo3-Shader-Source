@@ -44,9 +44,14 @@ Texture2D<float4> ssgi_probe_L0  : register(t27);
 Texture2D<float4> ssgi_probe_L1R : register(t28);
 Texture2D<float4> ssgi_probe_L1G : register(t29);
 Texture2D<float4> ssgi_probe_L1B : register(t30);
-// Reuse Hi-Z mip 4 (120×68 R32_FLOAT) as the native probe depth — zero additional memory.
-// ResourceHiZ4 is already built unconditionally every frame in [Present].
-Texture2D<float>  ssgi_probe_depth : register(t31);
+// Disocclusion-halo pass (June 2026): t31 REPURPOSED. Was ssgi_probe_depth (ResourceHiZ4)
+// — declared but never sampled since the S2 pixel-temporal consumer. Now the wide
+// depth-aware low-pass of the blurred AO buffer (CustomShaderAOLowFreq →
+// ResourceAOLowFreqL0, bound in the x==1 block of [ShaderRegexBindAOSSGI]):
+//   .b = low-frequency AO local mean — the disocclusion fill FLOOR (what AO "roughly is"
+//        around here when no depth-similar tap survives), .a = viewZ (0 = sky/unbound
+//        sentinel → fall back to neutral 1.0), .rg = blurred oct bentN (NOT consumed).
+Texture2D<float4> ao_lowfreq : register(t31);
 
 // halo3-ng: screen-space contact shadows (formerly composited in final_composite).
 // Bound via [ShaderRegexBindAOSSGI] on the same t21+t22 pattern every consumer of this
@@ -242,6 +247,25 @@ void apply_ao_ssgi_inline(
     float curr_viewZ  = 0.00781f / max(raw_depth, 1e-6f);
     float depth_scale = max(curr_viewZ * 0.1f, 0.05f);
 
+    // Disocclusion-halo pass (June 2026): Interleaved Gradient Noise (Jimenez 2014), keyed
+    // by pixel + frame ($ssgi_frame, x1). Two consumers: (a) ±30% jitter of the depth-accept
+    // threshold (gated by $disocc_dither, w2) so the accept/reject contour is per-pixel/
+    // per-frame stochastic noise instead of a coherent band trailing moving objects;
+    // (b) per-pixel rotation of the mode-2 ring-inpaint tap pattern below.
+    // NOTE: frac() is shadowed by the `float2 frac` local above (lesson #22) — computed
+    // manually as x - floor(x). All locals dz_-prefixed (lesson #20 banned-identifier list).
+    float dz_ign = 0.0f;
+    {
+        float  dz_frame = ssgi_iniparams.Load(int2(1, 0)).x;
+        float2 dz_p     = fragment_position + dz_frame * 5.588238f;
+        float  dz_t     = dot(dz_p, float2(0.06711056f, 0.00583715f));
+        dz_t   -= floor(dz_t);
+        dz_ign  = 52.9829189f * dz_t;
+        dz_ign -= floor(dz_ign);
+        if (ssgi_iniparams.Load(int2(2, 0)).w > 0.5f)
+            depth_scale *= 0.7f + 0.6f * dz_ign;
+    }
+
     // Frame-consistent reference depth ("sheen" fix, June 2026). The taps' .a viewZ was
     // recorded by the compute chain at the end of the PREVIOUS frame (prev view space);
     // comparing against curr_viewZ (current view space) made the test fail along the
@@ -282,25 +306,110 @@ void apply_ao_ssgi_inline(
     wb.z = (1.0f - frac.x) * frac.y;
     wb.w = frac.x          * frac.y;
 
-    float4 wd;  // depth similarity vs expectedPrevZ (0 on sky sentinel ao.a<=0)
-    wd.x = saturate(1.0f - abs(ao00.a - expectedPrevZ) / depth_scale) * step(0.001f, ao00.a);
-    wd.y = saturate(1.0f - abs(ao10.a - expectedPrevZ) / depth_scale) * step(0.001f, ao10.a);
-    wd.z = saturate(1.0f - abs(ao01.a - expectedPrevZ) / depth_scale) * step(0.001f, ao01.a);
-    wd.w = saturate(1.0f - abs(ao11.a - expectedPrevZ) / depth_scale) * step(0.001f, ao11.a);
+    // ONE-SIDED depth accept (June 12 2026 — FSR depth-clip semantics): occlusion is
+    // one-sided. A tap NEARER than expectedPrevZ holds the OCCLUDER's data — that is the
+    // ghost/halo source and gets the strict graded reject (unchanged: 0 at 1x depth_scale).
+    // A tap DEEPER holds some background's data — statistically valid AO/GI fill even when
+    // the depth mismatches; the old abs() test rejected nearly ALL background data in
+    // depth-busy scenes (jungle foliage), leaving only the bright neutral/floor band
+    // trailing movers and dimming the effects during pans. Far side: soft falloff to 0 at
+    // 8x depth_scale (caps cross-silhouette reuse from very distant surfaces).
+    float4 wd;  // depth accept vs expectedPrevZ (0 on sky sentinel ao.a<=0)
+    {
+        float4 dz4 = float4(ao00.a, ao10.a, ao01.a, ao11.a) - expectedPrevZ.xxxx;
+        wd = min(saturate(1.0f.xxxx + dz4 / depth_scale),
+                 saturate(1.0f.xxxx - dz4 / (8.0f * depth_scale)));
+        wd.x *= step(0.001f, ao00.a);
+        wd.y *= step(0.001f, ao10.a);
+        wd.z *= step(0.001f, ao01.a);
+        wd.w *= step(0.001f, ao11.a);
+    }
 
     float4 w    = wb * wd;
     float  wsum = dot(w, 1.0f.xxxx);
 
     // Disocclusion handling. `da_*` locals are prefixed to avoid colliding with the probe
     // block's later inv_w/wsum reuse and to dodge intrinsic shadowing. The weighted average is
-    // always computed (cheap) so both the legacy cliff and the smooth fade share it.
-    float  da_mode  = ssgi_iniparams.Load(int2(1, 0)).w;   // $disocc_mode (Shift+F8): 0=legacy hard cliff, 1=smooth fade
+    // always computed (cheap) so all three modes share it.
+    float  da_mode  = ssgi_iniparams.Load(int2(1, 0)).w;   // $disocc_mode (Shift+F8): 2=ring-inpaint fill (default), 1=smooth fade, 0=legacy hard cliff
     float  da_inv_w = 1.0f / max(wsum, 1e-4f);
     float4 da_ao    = (ao00 * w.x + ao10 * w.y + ao01 * w.z + ao11 * w.w) * da_inv_w;
     float4 da_gi    = (gi00 * w.x + gi10 * w.y + gi01 * w.z + gi11 * w.w) * da_inv_w;
     float3 da_l1r   = (gdr00 * w.x + gdr10 * w.y + gdr01 * w.z + gdr11 * w.w) * da_inv_w;
     float3 da_l1g   = (gdg00 * w.x + gdg10 * w.y + gdg01 * w.z + gdg11 * w.w) * da_inv_w;
     float3 da_l1b   = (gdb00 * w.x + gdb10 * w.y + gdb01 * w.z + gdb11 * w.w) * da_inv_w;
+
+    // -------------------------------------------------------------------------
+    // Ring inpaint (mode 2, June 2026 disocclusion-halo pass). When the 2×2 bilateral
+    // fails (newly revealed pixels behind a moving object — the buffers hold the
+    // OCCLUDER's data there), search a wider ring of taps with a RELAXED depth accept:
+    // the revealed background continues spatially, so depth-similar data lives a few
+    // pixels outside the disoccluded band. Fill = weighted ring mean, falling back to
+    // the wide low-frequency AO/GI local means (ao_lowfreq t31 / ssgi_hbil_lowfreq t34)
+    // when even the ring finds nothing. NEVER neutral — neutral (AO=1, GI=0) is what
+    // painted the bright trailing outline. 6 taps, two interleaved radii (3px / 6px),
+    // rotation IGN-randomised per pixel per frame → residual error is noise, not a ring.
+    // `[branch]` keeps the ~22 extra Loads off the hot path (tracked pixels skip it).
+    // ring_-prefixed locals (lessons #20/#22).
+    // -------------------------------------------------------------------------
+    float  ring_fill_ao    = 1.0f;
+    float3 ring_fill_gi    = float3(0.0f, 0.0f, 0.0f);
+    float3 ring_fill_probe = float3(0.0f, 0.0f, 0.0f);
+    float  ring_fill_sss   = 1.0f;
+    [branch] if (da_mode > 1.5f && wsum < 0.5f)
+    {
+        float ring_relax = depth_scale * 3.0f;   // relaxed accept: background continuity
+        float ring_a0    = dz_ign * 6.2831853f;
+        float  ring_wsum   = 0.0f;
+        float  ring_ao_acc = 0.0f;
+        float3 ring_gi_acc = float3(0.0f, 0.0f, 0.0f);
+        float3 ring_pr_acc = float3(0.0f, 0.0f, 0.0f);
+        float  ring_ss_acc = 0.0f;
+        float  ring_ss_w   = 0.0f;
+        [unroll] for (int ring_k = 0; ring_k < 6; ring_k++)
+        {
+            float ring_ang = ring_a0 + float(ring_k) * 1.0471976f;
+            float ring_rad = (ring_k & 1) ? 6.0f : 3.0f;
+            float ring_s, ring_c;
+            sincos(ring_ang, ring_s, ring_c);
+            int2 ring_px = clamp(pix00 + int2(int(ring_c * ring_rad), int(ring_s * ring_rad)),
+                                 int2(0, 0), int2(1918, 1078));
+            float4 ring_ao_s = ao_ssgi_buffer.Load(int3(ring_px, 0));
+            // One-sided (June 12): nearer = occluder -> reject at ring_relax; deeper =
+            // background -> near-unconditional (8x falloff). In foliage the ring now
+            // almost always finds usable background instead of dropping to the floor.
+            float  ring_dz = ring_ao_s.a - expectedPrevZ;
+            float  ring_w = min(saturate(1.0f + ring_dz / ring_relax),
+                                saturate(1.0f - ring_dz / (8.0f * ring_relax)))
+                          * step(0.001f, ring_ao_s.a);
+            ring_ao_acc += ring_ao_s.b * ring_w;
+            ring_gi_acc += gi_buffer.Load(int3(ring_px, 0)).rgb * ring_w;
+            ring_pr_acc += ssgi_probe_L0.Load(int3(ring_px, 0)).rgb * ring_w;
+            ring_wsum   += ring_w;
+            // SSS shares the ring (its viewZ lives in .b, sentinel-gated separately).
+            float4 ring_ss_s = sss_buffer.Load(int3(ring_px, 0));
+            float  ring_sdz  = ring_ss_s.b - expectedPrevZ;
+            float  ring_sw   = min(saturate(1.0f + ring_sdz / ring_relax),
+                                   saturate(1.0f - ring_sdz / (8.0f * ring_relax)))
+                             * step(0.001f, ring_ss_s.b);
+            ring_ss_acc += ring_ss_s.r * ring_sw;
+            ring_ss_w   += ring_sw;
+        }
+        // Low-frequency floor. Sentinel-guarded: when the low-freq buffers are unbound /
+        // sky (a < 0.001 — e.g. effects toggled off via F4/F11) fall back to NEUTRAL so
+        // mode 2 degrades exactly like mode 1 instead of multiplying the scene by zero.
+        float4 ring_lf_ao_s = ao_lowfreq.Load(int3(pix00, 0));
+        float  ring_lf_ao   = (ring_lf_ao_s.a > 0.001f) ? saturate(ring_lf_ao_s.b) : 1.0f;
+        float4 ring_lf_gi_s = ssgi_hbil_lowfreq.Load(int3(pix00, 0));
+        float3 ring_lf_gi   = (ring_lf_gi_s.a > 0.001f) ? ring_lf_gi_s.rgb : float3(0.0f, 0.0f, 0.0f);
+        // ~1.5 accepted taps → trust the ring mean over the low-freq floor.
+        float ring_conf = saturate(ring_wsum / 1.5f);
+        float ring_inv  = 1.0f / max(ring_wsum, 1e-4f);
+        ring_fill_ao    = lerp(ring_lf_ao, ring_ao_acc * ring_inv, ring_conf);
+        ring_fill_gi    = lerp(ring_lf_gi, ring_gi_acc * ring_inv, ring_conf);
+        ring_fill_probe = lerp(ring_lf_gi, ring_pr_acc * ring_inv, ring_conf);
+        ring_fill_sss   = (ring_ss_w > 1e-4f) ? (ring_ss_acc / ring_ss_w) : 1.0f;
+    }
 
     float4 ao_s, gi_s;
     float3 l1_r, l1_g, l1_b;
@@ -310,7 +419,22 @@ void apply_ao_ssgi_inline(
     // to WORLD UP with ao_s.a=curr_viewZ passing the validity gate, so the cavity kick gave
     // walls/ceilings a spurious ~50% darkening exactly at reveals (the disocclusion smear).
     float da_conf = 1.0f;
-    if (da_mode > 0.5f)
+    if (da_mode > 1.5f)
+    {
+        // Ring-inpaint fill (mode 2). da_cf: 0 = fully disoccluded → ring/low-freq fill,
+        // 1 = fully tracked → bilateral average. AO and GI crossfade to their FILLS (never
+        // neutral); L1 + the detail high-pass still fade with confidence — both are
+        // zero-mean directional terms whose absence is invisible, unlike the DC AO/GI.
+        // curr_viewZ kept in .a so the downstream valid-gate applies the filled AO.
+        float da_cf = saturate(wsum * 2.0f);
+        ao_s = float4(da_ao.rg * da_cf, lerp(ring_fill_ao, da_ao.b, da_cf), curr_viewZ);
+        gi_s = float4(lerp(ring_fill_gi, da_gi.rgb, da_cf), curr_viewZ);
+        l1_r = da_l1r * da_cf;
+        l1_g = da_l1g * da_cf;
+        l1_b = da_l1b * da_cf;
+        da_conf = da_cf;
+    }
+    else if (da_mode > 0.5f)
     {
         // Smooth disocclusion fade. confidence = accepted bilateral weight: the bilinear
         // weights sum to 1 and the depth weights are <=1, so wsum in [0,1]. At a disocclusion
@@ -364,6 +488,20 @@ void apply_ao_ssgi_inline(
         if (bn_len2 > 1e-4f)
         {
             bentN_ws = bentN_ws * rsqrt(bn_len2);
+            have_bentN = true;
+        }
+    }
+    // Mode-2 disocclusion fallback (June 2026): on an unoccluded open surface the bent
+    // normal equals the projected surface normal (the Klehm 2011 invariant), so the surface
+    // normal is the physically-correct stand-in when the stored bent normal is conf-faded.
+    // Keeps the far-field sky-leak from popping to zero at reveals; the cavity kick sees
+    // tilt = dot(N,N) = 1 → neutral (and is further faded by da_conf anyway).
+    if (!have_bentN && da_mode > 1.5f && ao_viewZ > 0.001f)
+    {
+        float bn_sn2 = dot(surface_normal, surface_normal);
+        if (bn_sn2 > 0.01f)
+        {
+            bentN_ws = surface_normal * rsqrt(bn_sn2);
             have_bentN = true;
         }
     }
@@ -460,10 +598,16 @@ void apply_ao_ssgi_inline(
         // jitter when the reprojected UV straddles a depth discontinuity.
         // Reference is expectedPrevZ (NOT curr_viewZ): the SSS buffer's .b viewZ is
         // prev-frame view space — same "sheen" band fix as the AO/GI bilateral above.
-        float sss_wd0 = saturate(1.0f - abs(s00.b - expectedPrevZ) / depth_scale) * step(0.001f, s00.b);
-        float sss_wd1 = saturate(1.0f - abs(s10.b - expectedPrevZ) / depth_scale) * step(0.001f, s10.b);
-        float sss_wd2 = saturate(1.0f - abs(s01.b - expectedPrevZ) / depth_scale) * step(0.001f, s01.b);
-        float sss_wd3 = saturate(1.0f - abs(s11.b - expectedPrevZ) / depth_scale) * step(0.001f, s11.b);
+        // One-sided (June 12, matches the AO/GI bilateral): nearer = occluder shadow ->
+        // strict reject; deeper = background shadow -> lenient (8x falloff).
+        float sss_dz0 = s00.b - expectedPrevZ;
+        float sss_dz1 = s10.b - expectedPrevZ;
+        float sss_dz2 = s01.b - expectedPrevZ;
+        float sss_dz3 = s11.b - expectedPrevZ;
+        float sss_wd0 = min(saturate(1.0f + sss_dz0 / depth_scale), saturate(1.0f - sss_dz0 / (8.0f * depth_scale))) * step(0.001f, s00.b);
+        float sss_wd1 = min(saturate(1.0f + sss_dz1 / depth_scale), saturate(1.0f - sss_dz1 / (8.0f * depth_scale))) * step(0.001f, s10.b);
+        float sss_wd2 = min(saturate(1.0f + sss_dz2 / depth_scale), saturate(1.0f - sss_dz2 / (8.0f * depth_scale))) * step(0.001f, s01.b);
+        float sss_wd3 = min(saturate(1.0f + sss_dz3 / depth_scale), saturate(1.0f - sss_dz3 / (8.0f * depth_scale))) * step(0.001f, s11.b);
 
         // Combine bilinear fractional weights with depth similarity.
         float  sss_w0 = (1.0f - sss_frac.x) * (1.0f - sss_frac.y) * sss_wd0;
@@ -475,13 +619,31 @@ void apply_ao_ssgi_inline(
         float4 sss_data;
         if (sss_ws < 1e-4f)
         {
-            // All neighbours rejected — neutral fallback: fully lit, sky sentinel.
-            sss_data = float4(1.0f, 0.0f, 0.001f, 0.0f);
+            if (da_mode > 1.5f)
+            {
+                // Mode 2: ring-inpaint fill instead of fully-lit neutral — the missing
+                // contact shadow was the SSS component of the bright trailing outline.
+                // curr_viewZ in .b so the sentinel gate below applies the fill. When SSS
+                // is toggled off ($s=0 → t32 nulled) ring_fill_sss stays 1.0 → no-op.
+                sss_data = float4(ring_fill_sss, 0.0f, curr_viewZ, 0.0f);
+            }
+            else
+            {
+                // All neighbours rejected — neutral fallback: fully lit, sky sentinel.
+                sss_data = float4(1.0f, 0.0f, 0.001f, 0.0f);
+            }
         }
         else
         {
             float inv_sss_w = 1.0f / sss_ws;
             sss_data = (s00 * sss_w0 + s10 * sss_w1 + s01 * sss_w2 + s11 * sss_w3) * inv_sss_w;
+            // Mode 2: crossfade partial-confidence samples toward the ring fill so the
+            // shadow ramps smoothly through the disocclusion band instead of stepping.
+            if (da_mode > 1.5f)
+            {
+                float sss_cf = saturate(sss_ws * 2.0f);
+                sss_data.r = lerp(ring_fill_sss, sss_data.r, sss_cf);
+            }
         }
 
         if (sss_data.b > 0.001f)                        // viewZ sentinel — skip sky/unbound
@@ -586,7 +748,11 @@ void apply_ao_ssgi_inline(
         float visibility = saturate(dot(bentN_ws, N_ws));
         // da_conf: at reveals the probe GI fades to 0 — the far-field must fade with it,
         // not pop in along a half-faded bent normal (sky-coloured flash on floors).
-        farfield_c       = _AO_SampleCubeAccum(bentN_ws) * visibility * da_conf;
+        // Mode 2: floor the fade at 0.3 — the far-field is cached DC ambient sampled along
+        // the (surface-normal-fallback) bent normal, the least wrong thing available at a
+        // reveal; letting it flash fully off was part of the bright-outline contrast.
+        float ff_conf = (da_mode > 1.5f) ? max(da_conf, 0.3f) : da_conf;
+        farfield_c    = _AO_SampleCubeAccum(bentN_ws) * visibility * ff_conf;
     }
 
     // -------------------------------------------------------------------------
@@ -604,9 +770,11 @@ void apply_ao_ssgi_inline(
     // bilateral is identical. wsum / w / pix00 / inv_w are already in scope.
     // -------------------------------------------------------------------------
     float g_SSGIProbeStrength = max(ssgi_iniparams.Load(int2(5, 0)).x, 0.0f);
-    if (g_SSGIProbeStrength > 0.001f && wsum >= 1e-4f)
+    // Mode 2 enters this block even at wsum≈0 (full disocclusion) so probe_c can take the
+    // ring-inpaint fill instead of silently dropping the primary first bounce at reveals.
+    if (g_SSGIProbeStrength > 0.001f && (wsum >= 1e-4f || da_mode > 1.5f))
     {
-        float inv_w = 1.0f / wsum;
+        float inv_w = 1.0f / max(wsum, 1e-4f);
 
         float4 pL0_00 = ssgi_probe_L0.Load(int3(pix00 + int2(0, 0), 0));
         float4 pL0_10 = ssgi_probe_L0.Load(int3(pix00 + int2(1, 0), 0));
@@ -635,6 +803,12 @@ void apply_ao_ssgi_inline(
         probe_c.g = max(0.0f, pL0.g + k_dir * dot(pL1g, N_ws));
         probe_c.b = max(0.0f, pL0.b + k_dir * dot(pL1b, N_ws));
         probe_c *= g_SSGIProbeStrength;
+
+        // Mode 2: crossfade the tracked probe reconstruction with the ring-inpaint fill
+        // (L0-only, no directional term — direction is unknowable at a reveal) so the
+        // primary first bounce never drops to zero in the disoccluded band.
+        if (da_mode > 1.5f)
+            probe_c = lerp(ring_fill_probe * g_SSGIProbeStrength, probe_c, da_conf);
 
         // [Zero-DC corner-detail, June 2026] HBIL contributes ONLY its high-frequency
         // residual over its OWN low-frequency band — a true self-high-pass, so flats stay
