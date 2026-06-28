@@ -34,14 +34,15 @@
 
 #include "atmosphere.fx"
 #include "decorators.h"
+// halo3-ng (June 2026): decorators are a NORMAL ao_ssgi_inline consumer (foliage parity). The
+// VS computes a real per-vertex camera MV (see static-decorator VS below), so the consumer
+// reprojects the AO/GI/SSS it samples correctly.
+// Reveal-gated disocclusion (June 2026): the consumer now distinguishes a genuine reveal from a
+// stable foreground silhouette per-pixel (rv_reveal, FSR reconstructed-prev-depth). Decorator
+// leaf edges are stable cliffs (rv_reveal==0) → strict two-sided accept + no ring inpaint = clean,
+// exactly as the old DECORATOR_LEGACY_DEPTH_ACCEPT special-case did, but now via the unified path.
+// The special-case #define is therefore removed — decorators are a normal consumer.
 #include "ao_ssgi_inline.fx"
-
-// halo3-ng: previous-frame VP matrix (4x1 texture written by copy_vp_to_texture.hlsl).
-// Bound via [ShaderRegexBindDecorPrevVP] (pattern dcl_resource_texture2d.*t23).
-// Decorators have no SV_Target2 MV output, so we reconstruct MV in PS from world_position.
-#if defined(pc) && (DX_VERSION == 11)
-Texture2D<float4> prev_vp_decorator : register(t23);
-#endif
 
 // decorator shader is defined as 'world' vertex type, even though it really doesn't have a vertex type - it does its own custom vertex fetches
 //@generate decorator
@@ -149,10 +150,16 @@ void default_vs(
    ,out float3	out_normal  			:	TEXCOORD3
    ,out float3	out_world_position		:	TEXCOORD4	// halo3-ng: for decorator MV reconstruction
 #endif
+#if defined(pc) && defined(ACCUM_PIXEL_HAS_MV)
+   ,out noperspective float2	out_motion_vector	:	TEXCOORD5	// halo3-ng: VS-computed MV (foliage parity)
+#endif
    )
 {
 #ifdef pc
 	out_world_position = 0.0f;	// halo3-ng: default (overwritten below for non-faded verts)
+#endif
+#if defined(pc) && defined(ACCUM_PIXEL_HAS_MV)
+	out_motion_vector = float2(0.0f, 0.0f);	// halo3-ng: default for faded-vert early-out
 #endif
 	
 	
@@ -270,6 +277,39 @@ void default_vs(
 	out_world_position = world_position.xyz;	// halo3-ng: for prev-VP MV reconstruction in PS
 #endif
 
+#if defined(pc) && defined(ACCUM_PIXEL_HAS_MV)
+	// halo3-ng (June 2026): per-vertex camera MV, computed IN THE VS like foliage
+	// (compute_motion_vector, motion_vectors.fx) — inlined here because #include
+	// "motion_vectors.fx" crashes the decorator tag compile. Decorators are static world
+	// geometry, so camera motion IS the motion vector. Computing the prev-VP delta on the
+	// VS's exact world_position + out_position (rather than reconstructing in the PS from an
+	// interpolated world position) is what makes it correct: both sides use the same
+	// world_position, so the large-absolute-coordinate magnitude cancels and a static camera
+	// yields MV=0 (the prior PS reconstruction failed exactly this test — the dim-blue beacon).
+	{
+		float4 dec_pvp_r0 = sampler_prev_vp_matrix.t.Load(int3(0, 0, 0));
+		if (dec_pvp_r0.x != 0.0f || dec_pvp_r0.y != 0.0f || dec_pvp_r0.z != 0.0f || dec_pvp_r0.w != 0.0f)
+		{
+			float4x4 dec_prev_vp = float4x4(
+				dec_pvp_r0,
+				sampler_prev_vp_matrix.t.Load(int3(1, 0, 0)),
+				sampler_prev_vp_matrix.t.Load(int3(2, 0, 0)),
+				sampler_prev_vp_matrix.t.Load(int3(3, 0, 0)));
+			float4 dec_prev_clip = mul(float4(world_position.xyz, 1.0f), dec_prev_vp);
+			if (abs(dec_prev_clip.w) > 1e-6f && abs(out_position.w) > 1e-6f)
+			{
+				float2 dec_curr_ndc = out_position.xy / out_position.w;
+				float2 dec_prev_ndc = dec_prev_clip.xy / dec_prev_clip.w;
+				// UV-space MV: X same sign as NDC, Y flipped (NDC Y-up -> UV Y-down).
+				out_motion_vector = (dec_curr_ndc - dec_prev_ndc) * float2(0.5f, -0.5f);
+				// Weapon/first-person kill band (matches motion_vectors.fx); harmless for
+				// world-depth decorators (out_position.w >> 0.45 -> full MV).
+				out_motion_vector *= smoothstep(0.30f, 0.45f, out_position.w);
+			}
+		}
+	}
+#endif
+
 #ifdef DECORATOR_SHADED_LIGHT
 	float3 world_normal= rotated_position;
 #else
@@ -375,7 +415,10 @@ default_ps(
 	in float4	inscatter			:	TEXCOORD2
 #ifdef pc
    ,in float3	normal   			:	TEXCOORD3
-   ,in float3	world_position		:	TEXCOORD4	// halo3-ng: for MV reconstruction
+   ,in float3	world_position		:	TEXCOORD4	// halo3-ng: for expectedPrevZ depth test
+#endif
+#if defined(pc) && defined(ACCUM_PIXEL_HAS_MV)
+   ,in noperspective float2	motion_vector	:	TEXCOORD5	// halo3-ng: VS-computed camera MV
 #endif
    ) : SV_Target0					// w unused
 {
@@ -397,27 +440,13 @@ default_ps(
 	// halo3-ng: forward-integrated AO/SSGI — applied to diffuse (albedo*light) only,
 	// before inscatter is added so fog isn't darkened by AO. Engine fog attenuates AO/GI
 	// naturally downstream — no internal fog-fade in the helper.
-	// Decorators have no SV_Target2 per-pixel MV, so we reconstruct a camera-derived MV
-	// from world_position * prev_VP (decorators are static, so camera motion IS the MV).
+	// MV: the per-vertex camera MV computed in the VS (foliage parity) — reprojects the
+	// AO/GI/SSS the consumer samples. Replaces the broken PS-side DECORATOR_SOFT_CONSUMER
+	// derivation. 0 fallback on the non-MV (Xbox) path.
+#if defined(pc) && defined(ACCUM_PIXEL_HAS_MV)
+	float2 decorator_mv = motion_vector;
+#else
 	float2 decorator_mv = float2(0.0f, 0.0f);
-#if defined(pc) && (DX_VERSION == 11)
-	float4 prevVP_r0 = prev_vp_decorator.Load(int3(0, 0, 0));
-	if (prevVP_r0.x != 0.0f || prevVP_r0.y != 0.0f || prevVP_r0.z != 0.0f || prevVP_r0.w != 0.0f)
-	{
-		float4x4 prevVP = float4x4(
-			prevVP_r0,
-			prev_vp_decorator.Load(int3(1, 0, 0)),
-			prev_vp_decorator.Load(int3(2, 0, 0)),
-			prev_vp_decorator.Load(int3(3, 0, 0)));
-		float4 prevClip = mul(float4(world_position, 1.0f), prevVP);
-		if (abs(prevClip.w) > 1e-6f)
-		{
-			float2 prevNDC = prevClip.xy / prevClip.w;
-			float2 prevUV  = prevNDC * float2(0.5f, -0.5f) + 0.5f;
-			float2 currUV  = (screen_position.xy + 0.5f) / float2(1920.0f, 1080.0f);
-			decorator_mv   = currUV - prevUV;
-		}
-	}
 #endif
 	float3 diffuse_lit = texcoord.rgb * light.rgb;
 	apply_ao_ssgi_inline(diffuse_lit, texcoord.rgb, normal, screen_position.xy, decorator_mv, screen_position.z,
@@ -439,7 +468,13 @@ default_ps(
 	pix.albedo_specmask = base.albedo_specmask;
 	pix.normal          = base.normal;
 #ifdef ACCUM_PIXEL_HAS_DEPTH
-	pix._mv_gap         = 0;
+	// halo3-ng (June 2026): write the REAL VS-computed camera MV (decorator_mv) to SV_Target2 ->
+	// ResourceMotionVectors (decorators match [ShaderRegexBindMVRT], dcl_output o2). Was 0, which
+	// left the compute temporals + de-cross pre-fill with NO motion at decorator pixels -> decorator
+	// AO/GI/SSS history couldn't track under camera motion (the "decorators lag worse" bug). The
+	// consumer is unaffected (it reads the motion_vector PARAM, not this buffer) -> no double-reproj.
+	// Name stays _mv_gap (the fxc-compaction gap-filler); non-zero keeps it o2, o3 depth unchanged.
+	pix._mv_gap         = float4(decorator_mv, 0.0f, 0.0f);
 	pix.rawDepth        = screen_position.z;
 #endif
 #ifdef ACCUM_PIXEL_HAS_ROUGHNESS

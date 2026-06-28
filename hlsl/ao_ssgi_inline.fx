@@ -98,6 +98,14 @@ Texture2D<float4> ssgi_hbil_lowfreq : register(t34);
 // expectedPrevZ = world_position projected through THIS matrix puts both sides of the test
 // in prev-frame view space → valid under arbitrary camera motion (ssgi_pixel_temporal idiom).
 Texture2D<float4> prev_vp_ao : register(t35);
+
+// Optical-flow OBJECT motion-vector residual (Part 2, June 2026). ResourceObjectMV (240×135;
+// .xy = object screen-motion residual in UV, 0 unless $object_mv on). Bound at ps-t36 via
+// [ShaderRegexBindAOSSGI] (unconditional, like prev_vp_ao). Camera-only MVs read ~0 on animated
+// characters/weapons; this is the OBJECT component. Subtracted from the per-pixel camera reproj
+// (reproj_uv -= r) so a mover's 1-frame-stale AO/GI/SSS is fetched from where the object WAS.
+// Slot t36 (above prev_vp_ao t35; t≥21 avoids the fxc PARAM_SAMPLER_2D collision, lesson #18).
+Texture2D<float4> g_object_mv : register(t36);
 #endif
 
 // Stage 2' — DirectionToCube: mirrors cubemap_accumulate.hlsl line 70-95 so the
@@ -201,14 +209,91 @@ void apply_ao_ssgi_inline(
 
     const float2 viewport_size = float2(1920.0f, 1080.0f);
     float2 curr_uv    = (fragment_position + float2(0.5f, 0.5f)) / viewport_size;
-    float2 reproj_uv  = curr_uv - mv_used;
 
-    // Phase-0 MV debug viz ($mv_debug = row-1 .z, Shift+F7). Per-pixel RAW MV as RG tint
-    // (x40): a horizontal pan should give smooth uniform RED scaling with 1/depth for
-    // translation (approx uniform for pure rotation). Zero/noisy/wrong-dir => the MV is the bug.
+    float curr_viewZ  = 0.00781f / max(raw_depth, 1e-6f);
+    float depth_scale = max(curr_viewZ * 0.1f, 0.05f);
+
+    // EXACT per-pixel camera reprojection (June 2026 — supersedes the noperspective per-vertex MV).
+    // The per-vertex MV (motion_vector / SV_Target2) is camera-only AND a flat-ramp-per-triangle
+    // approximation of the ≈1/z parallax field (noperspective interpolation) → kinked MV bands across
+    // large low-poly floors/ramps/walls (the wedges in the Shift+F7 overlay) → AO/GI/SSS warp under
+    // camera motion. world_position arrives perspective-correct; projecting it through the PREVIOUS
+    // VP yields the EXACT previous-frame screen UV of this pixel's surface point — tessellation-
+    // independent, no triangle-edge kinks. Reuses the same pv_clip/pv_mat the expectedPrevZ depth
+    // test already trusts (proven-good t35 prev_vp_ao matrix). On a static camera prev_VP==curr_VP →
+    // prev_uv ≈ this pixel's own UV → MV≈0 (no large-coord subtraction, so no precision drift).
+    // $reproj_scale (Shift+F6) still scales the FALLBACK per-vertex path; it is a deliberate no-op on
+    // the exact path (the prev-VP projection has no scalar knob) — kept for A/B of the fallback only.
+    float  expectedPrevZ = curr_viewZ;   // fallback: no prev VP yet / no world_position
+    float2 prev_uv       = curr_uv;      // fallback reproj target
+    bool   have_prev_uv  = false;
+    {
+        float4 pv_r0 = prev_vp_ao.Load(int3(0, 0, 0));
+        if ((pv_r0.x != 0.0f || pv_r0.y != 0.0f || pv_r0.z != 0.0f || pv_r0.w != 0.0f)
+            && dot(world_position, world_position) > 1e-8f)
+        {
+            float4x4 pv_mat = float4x4(
+                pv_r0,
+                prev_vp_ao.Load(int3(1, 0, 0)),
+                prev_vp_ao.Load(int3(2, 0, 0)),
+                prev_vp_ao.Load(int3(3, 0, 0)));
+            float4 pv_clip = mul(float4(world_position, 1.0f), pv_mat);
+            if (pv_clip.w > 1e-6f)
+            {
+                // expectedPrevZ: this pixel's viewZ in the PREVIOUS frame's view space (sheen fix —
+                // frame-consistent reference depth for the bilateral .a test below).
+                float pv_rawD = pv_clip.z / pv_clip.w;
+                if (pv_rawD > 1e-5f)
+                {
+                    float pv_z = 0.00781f / pv_rawD;
+                    // Sanity: the camera cannot translate >50% of viewZ in one frame —
+                    // a larger delta means a stale/garbage matrix or bad world_position.
+                    if (abs(pv_z - curr_viewZ) < 0.5f * curr_viewZ)
+                        expectedPrevZ = pv_z;
+                }
+                // prev_uv: EXACT previous-frame screen UV of this pixel = camera reprojection target.
+                // curr_viewZ > 0.45 weapon gate — the camera-locked weapon must NOT be camera-
+                // reprojected (mirrors motion_vectors.fx smoothstep(0.30,0.45) + the temporals' >0.45
+                // gate). The weapon falls through to the per-vertex fallback where mv_used≈0 (killed at
+                // source) → reproj_uv = curr_uv (camera-locked, correct).
+                if (curr_viewZ > 0.45f)
+                {
+                    prev_uv = float2(pv_clip.x / pv_clip.w * 0.5f + 0.5f,
+                                     0.5f - pv_clip.y / pv_clip.w * 0.5f);
+                    have_prev_uv = true;
+                }
+            }
+        }
+    }
+
+    float2 reproj_uv = have_prev_uv ? prev_uv : (curr_uv - mv_used);
+
+    // Object-motion residual (optical flow, Part 2): subtract the OBJECT screen motion so a moving
+    // character's/weapon's 1-frame-stale AO/GI/SSS sample is fetched from where the object WAS.
+    // reproj_uv = uv - camMV - r (matches the temporals' mv += r). ZERO unless $object_mv on (gated
+    // in object_mv_finalize) -> reproj_uv unchanged -> bit-identical. Bilinear from the 240×135 field.
+    // omv_-prefixed locals (no frac()/banned-identifier collision; floor used, not frac — lessons #20/#22).
+    {
+        float2 omv_p  = curr_uv * float2(240.0f, 135.0f) - 0.5f;
+        float2 omv_fl = floor(omv_p);
+        float2 omv_f  = omv_p - omv_fl;
+        int2   omv_b  = clamp(int2(omv_fl), int2(0, 0), int2(238, 133));
+        float2 omv00 = g_object_mv.Load(int3(omv_b + int2(0, 0), 0)).xy;
+        float2 omv10 = g_object_mv.Load(int3(omv_b + int2(1, 0), 0)).xy;
+        float2 omv01 = g_object_mv.Load(int3(omv_b + int2(0, 1), 0)).xy;
+        float2 omv11 = g_object_mv.Load(int3(omv_b + int2(1, 1), 0)).xy;
+        reproj_uv -= lerp(lerp(omv00, omv10, omv_f.x), lerp(omv01, omv11, omv_f.x), omv_f.y);
+    }
+
+    // Phase-0 MV debug viz ($mv_debug = row-1 .z, Shift+F7). Shows the per-pixel MV ACTUALLY USED
+    // for reprojection (curr_uv - reproj_uv) as RG tint (x40) — the exact per-pixel camera MV on
+    // world geometry, the per-vertex fallback on the weapon / frame-0. A horizontal pan should give
+    // a SMOOTH red gradient scaling with 1/depth across low-poly floors (NO wedge/band kinks at
+    // triangle edges — that banding was the per-vertex+noperspective artifact this fix removes).
     if (ssgi_iniparams.Load(int2(1, 0)).z > 0.5f)
     {
-        diffuse_color = float3(abs(motion_vector.x) * 40.0f, abs(motion_vector.y) * 40.0f, 0.0f);
+        float2 dbg_mv = curr_uv - reproj_uv;
+        diffuse_color = float3(abs(dbg_mv.x) * 40.0f, abs(dbg_mv.y) * 40.0f, 0.0f);
         return;
     }
 
@@ -244,8 +329,7 @@ void apply_ao_ssgi_inline(
     float3 gdb01 = gi_dir_b.Load(int3(pix00 + int2(0, 1), 0)).rgb;
     float3 gdb11 = gi_dir_b.Load(int3(pix00 + int2(1, 1), 0)).rgb;
 
-    float curr_viewZ  = 0.00781f / max(raw_depth, 1e-6f);
-    float depth_scale = max(curr_viewZ * 0.1f, 0.05f);
+    // curr_viewZ + depth_scale are now computed at the top (hoisted with the per-pixel reproj block).
 
     // Disocclusion-halo pass (June 2026): Interleaved Gradient Noise (Jimenez 2014), keyed
     // by pixel + frame ($ssgi_frame, x1). Two consumers: (a) ±30% jitter of the depth-accept
@@ -266,59 +350,111 @@ void apply_ao_ssgi_inline(
             depth_scale *= 0.7f + 0.6f * dz_ign;
     }
 
-    // Frame-consistent reference depth ("sheen" fix, June 2026). The taps' .a viewZ was
-    // recorded by the compute chain at the end of the PREVIOUS frame (prev view space);
-    // comparing against curr_viewZ (current view space) made the test fail along the
-    // iso-depth contour z ≈ 10·v·dt under translation — a graded bright/dark band sliding
-    // with movement speed and rotating with the camera. Project this fragment's world
-    // position through the previous frame's VP instead (decorator/water prev-VP pattern;
-    // expectedPrevZ idiom from ssgi_pixel_temporal.hlsl).
-    float expectedPrevZ = curr_viewZ;   // fallback: no prev VP yet / no world_position
-    {
-        float4 pv_r0 = prev_vp_ao.Load(int3(0, 0, 0));
-        if ((pv_r0.x != 0.0f || pv_r0.y != 0.0f || pv_r0.z != 0.0f || pv_r0.w != 0.0f)
-            && dot(world_position, world_position) > 1e-8f)
-        {
-            float4x4 pv_mat = float4x4(
-                pv_r0,
-                prev_vp_ao.Load(int3(1, 0, 0)),
-                prev_vp_ao.Load(int3(2, 0, 0)),
-                prev_vp_ao.Load(int3(3, 0, 0)));
-            float4 pv_clip = mul(float4(world_position, 1.0f), pv_mat);
-            if (pv_clip.w > 1e-6f)
-            {
-                float pv_rawD = pv_clip.z / pv_clip.w;
-                if (pv_rawD > 1e-5f)
-                {
-                    float pv_z = 0.00781f / pv_rawD;
-                    // Sanity: the camera cannot translate >50% of viewZ in one frame —
-                    // a larger delta means a stale/garbage matrix or bad world_position.
-                    if (abs(pv_z - curr_viewZ) < 0.5f * curr_viewZ)
-                        expectedPrevZ = pv_z;
-                }
-            }
-        }
-    }
+    // (expectedPrevZ — this pixel's viewZ in the previous frame's view space, the "sheen"-fix
+    // reference depth for the bilateral .a test below — is now computed at the top alongside the
+    // per-pixel reproj, from the same pv_clip. The standalone block here was removed.)
 
-    float4 wb;  // bilinear weights
+    // Reveal factor (June 2026 — FSR reconstructed-prev-depth, one-sided + EvaluateSurface guard).
+    // Distinguishes a GENUINE disocclusion reveal (NPC/weapon/camera) from a STABLE foreground
+    // silhouette (decorator leaf, thin object, hill crest). The buffer taps' .a = prev-frame viewZ
+    // of whatever was rendered at this (reprojected) location last frame; expectedPrevZ = THIS
+    // fragment's own surface reprojected into prev-frame view space.
+    //   rv_raw    : fragment much DEEPER than the prev surface here (bilinear mean) => occluded.
+    //   rv_smooth : FSR EvaluateSurface analog (ffx_fsr3upscaler_depth_clip.h). If the footprint
+    //               STRADDLES a depth cliff (large near..far spread) it's a static silhouette, NOT
+    //               a reveal => suppress. A genuine reveal has the whole footprint on the occluder
+    //               (small spread). This guard's absence made v1 false-fire at every thin edge /
+    //               NPC silhouette / decorator leaf (the "pop"/shift/bleed regression).
+    // knee + spread-onset live-tunable via IniParams (3,0).y / (3,0).z (default-guarded). The
+    // failure mode of both is toward the stable strict baseline (never dark, never a pop).
+    // MV-independent (works for the MV-killed weapon and animated NPCs). Sky/unbound taps
+    // (a<=0.001) excluded from the bilinear weights (June 2026: was min/max — see below).
+    float rv_knee = ssgi_iniparams.Load(int2(3, 0)).y;
+    rv_knee = (rv_knee > 0.001f) ? rv_knee : 1.2f;
+    float rv_spread_onset = ssgi_iniparams.Load(int2(3, 0)).z;
+    rv_spread_onset = (rv_spread_onset > 0.001f) ? rv_spread_onset : 0.15f;
+    float4 wb;  // bilinear weights (hoisted above the reveal block - zigzag fix, June 2026)
     wb.x = (1.0f - frac.x) * (1.0f - frac.y);
     wb.y = frac.x          * (1.0f - frac.y);
     wb.z = (1.0f - frac.x) * frac.y;
     wb.w = frac.x          * frac.y;
 
-    // ONE-SIDED depth accept (June 12 2026 — FSR depth-clip semantics): occlusion is
-    // one-sided. A tap NEARER than expectedPrevZ holds the OCCLUDER's data — that is the
-    // ghost/halo source and gets the strict graded reject (unchanged: 0 at 1x depth_scale).
-    // A tap DEEPER holds some background's data — statistically valid AO/GI fill even when
-    // the depth mismatches; the old abs() test rejected nearly ALL background data in
-    // depth-busy scenes (jungle foliage), leaving only the bright neutral/floor band
-    // trailing movers and dimming the effects during pans. Far side: soft falloff to 0 at
-    // 8x depth_scale (caps cross-silhouette reuse from very distant surfaces).
+    float rv_reveal = 0.0f;
+    {
+        // SUB-PIXEL bilinear statistics (June 2026 zigzag fix). The old min/max over the
+        // floor()-snapped 2x2 footprint stepped as sub-pixel camera motion shifted WHICH 4
+        // pixels were sampled -> stair-stepped reveal outlines under motion (the Ctrl+F6
+        // mode-2 overlay zigzagged on its own). Weight each tap by its bilinear weight wb
+        // (-> 0 for the row/col entering or leaving at the integer boundary) so BOTH the
+        // reference depth (mean) and the spread (std/mean) vary CONTINUOUSLY -> no zigzag.
+        // rv_raw now tests expectedPrevZ vs the bilinear MEAN (was the min); at a clean
+        // reveal mean ~= min so it fires the same, at a straddled silhouette the mean sits
+        // between near/far -> partial, and the high-variance rv_smooth suppresses it.
+        // rv_spread is now std/mean (NOT (max-min)/max) -> different scale, so $reveal_spread
+        // (Ctrl+F9, default 0.15) likely wants lowering to ~0.10-0.12; re-tune live.
+        // Sky/unbound taps (a<=0.001) excluded from the bilinear weights.
+        float rv_prevZ  = curr_viewZ;                              // overlay reference (mean prev depth)
+        float rv_spread = 0.0f, rv_raw = 0.0f, rv_smooth = 1.0f;   // overlay locals
+        float4 rv_z   = float4(ao00.a, ao10.a, ao01.a, ao11.a);    // prev-frame viewZ of the 4 taps
+        float4 rv_vw  = wb * step(0.001f, rv_z);                   // bilinear weight, sky excluded
+        float  rv_vws = dot(rv_vw, 1.0f.xxxx);
+        if (rv_vws > 1e-4f)
+        {
+            float rv_inv    = 1.0f / rv_vws;
+            rv_prevZ        = dot(rv_vw, rv_z) * rv_inv;                       // continuous mean depth
+            float rv_prevZ2 = dot(rv_vw, rv_z * rv_z) * rv_inv;
+            float rv_var    = max(0.0f, rv_prevZ2 - rv_prevZ * rv_prevZ);
+            rv_spread       = sqrt(rv_var) / max(rv_prevZ, 1e-4f);            // continuous std/mean
+            rv_raw          = saturate((expectedPrevZ / max(rv_prevZ, 1e-4f) - rv_knee) / 0.6f);
+            rv_smooth       = 1.0f - saturate((rv_spread - rv_spread_onset) / 0.35f);
+            rv_reveal       = rv_raw * rv_smooth;
+        }
+
+        // --- rv_reveal DEBUG overlay ($reveal_debug = (3,0).w, Ctrl+F6) — diagnostic only ---
+        // mode 1: R = rv_reveal (fill FIRING) | G = rv_raw*(1-rv_smooth) (a depth-jump the guard
+        //         SUPPRESSED — green at static silhouettes/decorator leaf edges is CORRECT; green
+        //         on an NPC trail interior means the guard is over-killing a real reveal) | B = 0.
+        //         So: black = stable (no reveal), red = fill active, green = guard-suppressed jump.
+        // mode 2: R = raw depth-jump magnitude (ratio-1, pre-knee) | G = footprint spread | B = 0.
+        // If Ctrl+F6 shows NOTHING changing, the v2 shader isn't loaded (needs a LEVEL reload, not
+        // just F10) or the IniParam (3,0).w isn't reaching the shader.
+        float rv_dbg = ssgi_iniparams.Load(int2(3, 0)).w;
+        if (rv_dbg > 0.5f)
+        {
+            if (rv_dbg < 1.5f)
+                diffuse_color = float3(rv_reveal, rv_raw * (1.0f - rv_smooth), 0.0f);
+            else
+                diffuse_color = float3(saturate(expectedPrevZ / max(rv_prevZ, 1e-4f) - 1.0f),
+                                       saturate(rv_spread), 0.0f);
+            return;
+        }
+    }
+
+    // (wb bilinear weights hoisted above the reveal block - zigzag fix, June 2026)
+
+    // REVEAL-GATED depth accept (June 2026). Two regimes, blended per-pixel by rv_reveal:
+    //   - stable surface (rv_reveal==0): two-sided abs() reject — deeper occluded-background taps
+    //     are rejected so their dark AO/GI can't bleed across a static silhouette (the dark-ring
+    //     class of bug). This is the pre-disocclusion behaviour.
+    //   - genuine reveal (rv_reveal==1): one-sided, deeper-lenient (FSR depth-clip) — the now-
+    //     visible deeper surface IS this fragment, so its background data is the correct fill;
+    //     nearer (occluder/ghost) taps still get the strict 0-at-1x reject, far side falls to 0 at
+    //     8x depth_scale. Fills the bright NPC/weapon trailing band with real background data.
     float4 wd;  // depth accept vs expectedPrevZ (0 on sky sentinel ao.a<=0)
     {
         float4 dz4 = float4(ao00.a, ao10.a, ao01.a, ao11.a) - expectedPrevZ.xxxx;
-        wd = min(saturate(1.0f.xxxx + dz4 / depth_scale),
-                 saturate(1.0f.xxxx - dz4 / (8.0f * depth_scale)));
+        // Reveal-gated accept (June 2026, unified — supersedes the DECORATOR_LEGACY #ifdef):
+        //   strict = two-sided abs() — rejects deeper occluded-background taps (clean at stable
+        //            silhouettes: decorator leaf edges, hill crests). reveal==0 here is
+        //            bit-identical to the retired decorator-legacy path.
+        //   reveal = one-sided deeper-lenient (FSR depth-clip) — accepts the now-visible deeper
+        //            surface (correct fill at a genuine disocclusion). 0 at 1x near, 8x far.
+        // lerp by rv_reveal: deeper-lenience fires ONLY where this fragment was actually occluded
+        // last frame, never at a static foreground cliff (that was the dark-ring bug).
+        float4 rv_wd_strict = saturate(1.0f.xxxx - abs(dz4) / depth_scale);
+        float4 rv_wd_reveal = min(saturate(1.0f.xxxx + dz4 / depth_scale),
+                                  saturate(1.0f.xxxx - dz4 / (8.0f * depth_scale)));
+        wd = lerp(rv_wd_strict, rv_wd_reveal, rv_reveal);
         wd.x *= step(0.001f, ao00.a);
         wd.y *= step(0.001f, ao10.a);
         wd.z *= step(0.001f, ao01.a);
@@ -356,20 +492,45 @@ void apply_ao_ssgi_inline(
     float3 ring_fill_gi    = float3(0.0f, 0.0f, 0.0f);
     float3 ring_fill_probe = float3(0.0f, 0.0f, 0.0f);
     float  ring_fill_sss   = 1.0f;
-    [branch] if (da_mode > 1.5f && wsum < 0.5f)
+    // Reveal-gated ring inpaint (June 2026, unified). Fires ONLY at a genuine reveal
+    // (rv_reveal > 0.5). At a stable silhouette (rv_reveal == 0) the ring is skipped, ring_fill_*
+    // stay at their neutral inits (AO=1, GI=0, probe=0, sss=1), and the mode-2 compose below
+    // fades AO->1/GI->0 = clean bright edge — bit-identical to the retired decorator-legacy path.
+    [branch] if (da_mode > 1.5f && wsum < 0.5f && rv_reveal > 0.05f)  // 0.05 = perf-only; fill ramps smoothly via the ring_fill lerp-from-neutral above
     {
         float ring_relax = depth_scale * 3.0f;   // relaxed accept: background continuity
         float ring_a0    = dz_ign * 6.2831853f;
+        // Ring reach — live-tunable via $ring_radius (IniParams (5,0).z, Ctrl+F12; default 1.0).
+        // The old 6-tap / 6px ring UNDER-REACHED fast disocclusion bands: the revealed band width
+        // scales with the mover's SCREEN speed (confirmed in-game via the reveal overlay — the red
+        // band grows with NPC speed), so a band wider than 6px had no real background within reach
+        // and fell to the crude, occluder-contaminated low-freq floor = the residual NPC
+        // disocclusion artefact. A 12-tap golden-angle spiral out to ~14px (past block 3's 12px
+        // disc) reaches real background for fast movers — and does it at CONSUME time (no buffer
+        // write, so no foreground corruption / lag, unlike the retired block-3 pre-fill). Distance
+        // falloff (ring_distw) keeps the NEAREST valid background dominant so narrow bands aren't
+        // polluted by a far deeper surface; outer taps only carry weight when the inner ones miss.
+        float ring_rscale = ssgi_iniparams.Load(int2(5, 0)).z;
+        ring_rscale = (ring_rscale > 0.001f) ? ring_rscale : 1.0f;
+        float ring_max_r = 14.0f * ring_rscale;
+        const int kRingTaps = 12;
         float  ring_wsum   = 0.0f;
         float  ring_ao_acc = 0.0f;
         float3 ring_gi_acc = float3(0.0f, 0.0f, 0.0f);
         float3 ring_pr_acc = float3(0.0f, 0.0f, 0.0f);
         float  ring_ss_acc = 0.0f;
         float  ring_ss_w   = 0.0f;
-        [unroll] for (int ring_k = 0; ring_k < 6; ring_k++)
+        // [loop] NOT [unroll]: the ring already sits in a reveal-only [branch], so a real loop costs
+        // nothing at runtime on steady-state pixels, but compiling it as a dynamic loop (one body)
+        // instead of 12 inlined copies keeps apply_ao_ssgi_inline small — it's inlined into every
+        // static-lighting permutation, so the unrolled 12-tap version ballooned the template sweep
+        // time (~95 min). [loop] brings the per-permutation fxc cost back down. Same 12 taps/14px.
+        [loop] for (int ring_k = 0; ring_k < kRingTaps; ring_k++)
         {
-            float ring_ang = ring_a0 + float(ring_k) * 1.0471976f;
-            float ring_rad = (ring_k & 1) ? 6.0f : 3.0f;
+            float ring_t     = (float(ring_k) + 0.5f) / float(kRingTaps);  // 0..1 spiral param
+            float ring_rad   = lerp(3.0f, ring_max_r, ring_t);             // inner 3px -> outer reach
+            float ring_ang   = ring_a0 + float(ring_k) * 2.3999632f;       // golden angle (no axis star)
+            float ring_distw = 1.0f - 0.6f * ring_t;                       // prefer nearest valid bg
             float ring_s, ring_c;
             sincos(ring_ang, ring_s, ring_c);
             int2 ring_px = clamp(pix00 + int2(int(ring_c * ring_rad), int(ring_s * ring_rad)),
@@ -381,7 +542,7 @@ void apply_ao_ssgi_inline(
             float  ring_dz = ring_ao_s.a - expectedPrevZ;
             float  ring_w = min(saturate(1.0f + ring_dz / ring_relax),
                                 saturate(1.0f - ring_dz / (8.0f * ring_relax)))
-                          * step(0.001f, ring_ao_s.a);
+                          * step(0.001f, ring_ao_s.a) * ring_distw;
             ring_ao_acc += ring_ao_s.b * ring_w;
             ring_gi_acc += gi_buffer.Load(int3(ring_px, 0)).rgb * ring_w;
             ring_pr_acc += ssgi_probe_L0.Load(int3(ring_px, 0)).rgb * ring_w;
@@ -391,7 +552,7 @@ void apply_ao_ssgi_inline(
             float  ring_sdz  = ring_ss_s.b - expectedPrevZ;
             float  ring_sw   = min(saturate(1.0f + ring_sdz / ring_relax),
                                    saturate(1.0f - ring_sdz / (8.0f * ring_relax)))
-                             * step(0.001f, ring_ss_s.b);
+                             * step(0.001f, ring_ss_s.b) * ring_distw;
             ring_ss_acc += ring_ss_s.r * ring_sw;
             ring_ss_w   += ring_sw;
         }
@@ -410,6 +571,15 @@ void apply_ao_ssgi_inline(
         ring_fill_probe = lerp(ring_lf_gi, ring_pr_acc * ring_inv, ring_conf);
         ring_fill_sss   = (ring_ss_w > 1e-4f) ? (ring_ss_acc / ring_ss_w) : 1.0f;
     }
+
+    // Smooth the disocclusion fill by the reveal factor (FSR consumes the depth-clip as a smooth
+    // factor, never a hard gate). ring_fill_* are at their neutral inits when the ring branch was
+    // skipped (rv_reveal<=0.05) or rv_reveal==0, so these lerps are no-ops there → bit-identical to
+    // the stable neutral path; they ramp to the full ring mean as rv_reveal→1. Kills the dolly "pop".
+    ring_fill_ao    = lerp(1.0f,          ring_fill_ao,    rv_reveal);
+    ring_fill_gi    = lerp(float3(0,0,0), ring_fill_gi,    rv_reveal);
+    ring_fill_probe = lerp(float3(0,0,0), ring_fill_probe, rv_reveal);
+    ring_fill_sss   = lerp(1.0f,          ring_fill_sss,   rv_reveal);
 
     float4 ao_s, gi_s;
     float3 l1_r, l1_g, l1_b;
@@ -604,10 +774,22 @@ void apply_ao_ssgi_inline(
         float sss_dz1 = s10.b - expectedPrevZ;
         float sss_dz2 = s01.b - expectedPrevZ;
         float sss_dz3 = s11.b - expectedPrevZ;
-        float sss_wd0 = min(saturate(1.0f + sss_dz0 / depth_scale), saturate(1.0f - sss_dz0 / (8.0f * depth_scale))) * step(0.001f, s00.b);
-        float sss_wd1 = min(saturate(1.0f + sss_dz1 / depth_scale), saturate(1.0f - sss_dz1 / (8.0f * depth_scale))) * step(0.001f, s10.b);
-        float sss_wd2 = min(saturate(1.0f + sss_dz2 / depth_scale), saturate(1.0f - sss_dz2 / (8.0f * depth_scale))) * step(0.001f, s01.b);
-        float sss_wd3 = min(saturate(1.0f + sss_dz3 / depth_scale), saturate(1.0f - sss_dz3 / (8.0f * depth_scale))) * step(0.001f, s11.b);
+        // Reveal-gated SSS accept (unified — supersedes the DECORATOR_LEGACY #ifdef). Reuses the
+        // AO-derived rv_reveal (same reproj_uv; reveal is a per-fragment geometric fact). strict
+        // two-sided at stable silhouettes, one-sided deeper-lenient at genuine reveals. Sentinel
+        // factored out (both old arms multiplied step(0.001, .b) identically).
+        float sss_wd0 = lerp(saturate(1.0f - abs(sss_dz0) / depth_scale),
+                             min(saturate(1.0f + sss_dz0 / depth_scale), saturate(1.0f - sss_dz0 / (8.0f * depth_scale))),
+                             rv_reveal) * step(0.001f, s00.b);
+        float sss_wd1 = lerp(saturate(1.0f - abs(sss_dz1) / depth_scale),
+                             min(saturate(1.0f + sss_dz1 / depth_scale), saturate(1.0f - sss_dz1 / (8.0f * depth_scale))),
+                             rv_reveal) * step(0.001f, s10.b);
+        float sss_wd2 = lerp(saturate(1.0f - abs(sss_dz2) / depth_scale),
+                             min(saturate(1.0f + sss_dz2 / depth_scale), saturate(1.0f - sss_dz2 / (8.0f * depth_scale))),
+                             rv_reveal) * step(0.001f, s01.b);
+        float sss_wd3 = lerp(saturate(1.0f - abs(sss_dz3) / depth_scale),
+                             min(saturate(1.0f + sss_dz3 / depth_scale), saturate(1.0f - sss_dz3 / (8.0f * depth_scale))),
+                             rv_reveal) * step(0.001f, s11.b);
 
         // Combine bilinear fractional weights with depth similarity.
         float  sss_w0 = (1.0f - sss_frac.x) * (1.0f - sss_frac.y) * sss_wd0;
@@ -619,7 +801,7 @@ void apply_ao_ssgi_inline(
         float4 sss_data;
         if (sss_ws < 1e-4f)
         {
-            if (da_mode > 1.5f)
+            if (da_mode > 1.5f)   // ring_fill_sss is neutral (1.0) when rv_reveal<=0.05, so no hard reveal gate needed here (smooth via the ramp above)
             {
                 // Mode 2: ring-inpaint fill instead of fully-lit neutral — the missing
                 // contact shadow was the SSS component of the bright trailing outline.
@@ -647,7 +829,19 @@ void apply_ao_ssgi_inline(
         }
 
         if (sss_data.b > 0.001f)                        // viewZ sentinel — skip sky/unbound
-            diffuse_color *= max(sss_data.r, 0.05f);
+        {
+            // Indirect-light floor (June 2026): a contact shadow blocks DIRECT sun, not the
+            // omnidirectional ambient/bounce — but SSS multiplies the FULL diffuse (direct +
+            // engine ambient + baked indirect), so a flat 0.05 floor over-darkens ambient-lit
+            // areas. Floor the multiply by local ambient openness (AO): open surfaces (ao→1, lots
+            // of sky/bounce) can't crush below sss_floor_max; tight cavities (ao→0, little ambient)
+            // still reach 0.05 (the deep contact dark we want). Our additive SSGI bounce is applied
+            // AFTER this and fills further. sss_floor_max = IniParams (4,0).z (Ctrl+F5), default
+            // 0.20, default-guarded so an unset slot falls back to 0.20.
+            float sss_floor_max = ssgi_iniparams.Load(int2(4, 0)).z;
+            sss_floor_max = (sss_floor_max > 0.001f) ? sss_floor_max : 0.20f;
+            diffuse_color *= max(sss_data.r, lerp(0.05f, sss_floor_max, ao));
+        }
     }
 
     // SSGI indirect: AO-gated, receiver-weighted, albedo-detail modulated.

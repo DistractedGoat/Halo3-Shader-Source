@@ -990,8 +990,15 @@ color_reflection= environment_sample.rgb * alpha;
 
 			float4 ssr_val= ssr_direct.Load(int3(ssr_uv * float2(1920.0f, 1080.0f), 0));
 			//SSR controls
-			float3 ssr_pre_exposure= pow(ssr_val.rgb / max(g_exposure.r, 1e-4f), 1.2f) * 0.7f;
-			// float3 ssr_pre_exposure= ssr_val.rgb / max(g_exposure.r, 1e-4f);
+			// halo3-ng (June 2026): LINEAR, energy-conserving. A reflection must never carry MORE
+			// energy than the surface it reflects — but pow(x,1.2) is super-linear (x^1.2 > x for x>1),
+			// so it pushed bright reflections (sunlit rock/sky) BRIGHTER than the source → blown-out
+			// white water. Full-res SSR exposed it (the old half-res blur averaged those highlights
+			// down). Reflectance 0.7 (<1) keeps the reflection dimmer than the source; the soft-knee
+			// below + Fresnel (line ~1054) attenuate further. Matches environment_mapping.fx::
+			// apply_ssr_blend (also linear, no pow). Tune 0.7 down for dimmer reflections.
+			float3 ssr_pre_exposure= (ssr_val.rgb / max(g_exposure.r, 1e-4f)) * 0.7f;
+			// float3 ssr_pre_exposure= pow(ssr_val.rgb / max(g_exposure.r, 1e-4f), 1.2f) * 0.7f; // OLD super-linear (over-bright)
 			// halo3-ng: soft-knee luminance compression — full SSR contribution
 			// up to lum=1.5, asymptotic ceiling at lum=3.0. Replaces the prior
 			// hard cap (which clipped contribution at the cap). Curve points:
