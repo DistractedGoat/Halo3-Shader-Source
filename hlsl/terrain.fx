@@ -146,7 +146,10 @@ PARAM(float, fresnel_curve_steepness_m_##material_number);			\
 PARAM(float, area_specular_contribution_m_##material_number);		\
 PARAM(float, analytical_specular_contribution_m_##material_number);	\
 PARAM(float, environment_specular_contribution_m_##material_number);\
-PARAM(float, albedo_specular_tint_blend_m_##material_number);
+PARAM(float, albedo_specular_tint_blend_m_##material_number);		\
+PARAM_SAMPLER_2D(material_texture_m_##material_number);				\
+PARAM(float4, material_texture_m_##material_number##_xform);		\
+PARAM(bool, use_material_texture_m_##material_number);
 
 
 DECLARE_MATERIAL(0);
@@ -318,6 +321,62 @@ void calc_phong_outgoing_light(
 
 	area_specular_light= (x0 + (x1 - x2));
 */
+}
+
+// halo3-ng: GGX terrain specular ---------------------------------------------------------------
+// Terrain historically used Blinn-Phong (calc_phong_outgoing_light above). This swaps in the same
+// GGX (Trowbridge-Reitz NDF + Smith-GGX geometry) BRDF as cook_torrance_pbr_maps (cook_torrance.fx
+// L470-484) so terrain matches the PBR shaders (rocks). A/B via TERRAIN_GGX. Phase 1 derives
+// roughness from the blended Phong power (terrain_power_to_roughness); Phase 2 replaces that with a
+// per-pixel material_texture roughness.
+#define TERRAIN_GGX 1
+
+float terrain_power_to_roughness(float specular_power)
+{
+	// Reuse terrain's own power->roughness mapping (the one its envmap + SSR passthrough already use,
+	// see static_lighting_shared_ps) so the analytic GGX lobe, area/envmap spec, and roughness
+	// passthrough all stay consistent.
+	return clamp(1.01f - specular_power / 200.0f, 0.05f, 1.0f);
+}
+
+void calc_ggx_outgoing_light(
+	// geometric parameters in world space
+	in float3	normal_dir,
+	in float3	view_dir,				// fragment -> camera (normalized)
+	in float3	reflection_dir,			// unused; kept for signature parity with calc_phong_outgoing_light
+	in float	n_dot_v,
+	// GGX lobe parameter (replaces the Phong exponent)
+	in float	roughness,
+	// incident light parameters
+	in float3	analytical_light_dir,	// fragment -> light (normalized)
+	in float3	analytical_light_color,
+	// outgoing light (towards view)
+	out float3	analytical_specular_light)
+{
+	float n_dot_l = dot(normal_dir, analytical_light_dir);
+	if (n_dot_l > 0 && n_dot_v > 0)
+	{
+		float3 half_vector = normalize(view_dir + analytical_light_dir);
+		float n_dot_h = saturate(dot(normal_dir, half_vector));
+		float t_rough = max(roughness, 0.05f);
+		float ggx_alpha = t_rough * t_rough;
+		float ggx_alpha2 = ggx_alpha * ggx_alpha;
+		// GGX / Trowbridge-Reitz NDF
+		float denom = n_dot_h * n_dot_h * (ggx_alpha2 - 1.0f) + 1.0f;
+		float distribution = ggx_alpha2 / (3.14159265f * denom * denom + 0.00001f);
+		// Smith-GGX geometry (matches cook_torrance.fx L477-480)
+		float ggx_gv = 2.0f * n_dot_v / (n_dot_v + sqrt(ggx_alpha2 + (1.0f - ggx_alpha2) * n_dot_v * n_dot_v) + 0.00001f);
+		float ggx_gl = 2.0f * n_dot_l / (n_dot_l + sqrt(ggx_alpha2 + (1.0f - ggx_alpha2) * n_dot_l * n_dot_l) + 0.00001f);
+		float geometry = ggx_gv * ggx_gl;
+		// GGX lobe WITHOUT fresnel — terrain applies its own specular_tint/rim-fresnel afterward.
+		// Normalization matches cook_torrance.fx L482: D * saturate(G) / (pi * NdotV).
+		float spec = distribution * saturate(geometry) / (3.14159265f * n_dot_v + 0.00001f);
+		analytical_specular_light = analytical_light_color * spec;
+	}
+	else
+	{
+		analytical_specular_light = 0.0f;
+	}
 }
 
 /*
@@ -946,6 +1005,7 @@ struct specular_parameters
 {
 	float4 normal_albedo;			// specular albedo along normal (plus albedo blend in alpha)
 	float power;					// specular power
+	float roughness;				// per-pixel (material_texture G) or power-derived; weight-normalized like power
 	float analytical;				// analytical contribution	(* specular contribution)
 	float area;						// area contribution		(* specular contribution)
 	float envmap;					// envmap contribution		(* specular contribution)
@@ -954,18 +1014,37 @@ struct specular_parameters
 	float weight;
 };
 
-#define BLEND_SPECULAR(material_postfix, blend_amount, specular)						\
+// halo3-ng TERRAIN_PBR_MAPS: optional per-material material_texture (cook_torrance_pbr_maps
+// convention — R = specular coefficient, G = roughness), sampled per-slot inside the specular
+// blend so per-pixel roughness/spec participates in the same weight-normalized blend as the
+// scalar path. use_material_texture_m_N is a runtime bool constant (same sample-inside-branch
+// idiom as cook_torrance.fx:267); off -> scalar fallback == vanilla + power-derived roughness.
+#define TERRAIN_PBR_MAPS 1
+
+#define BLEND_SPECULAR(material_postfix, blend_amount, specular, blend_texcoord)		\
+{																						\
+	float2 mt_rg_##material_postfix= float2(											\
+		specular_coefficient_##material_postfix,										\
+		terrain_power_to_roughness(specular_power_##material_postfix));					\
+	if (TERRAIN_PBR_MAPS && use_material_texture_##material_postfix)					\
+	{																					\
+		mt_rg_##material_postfix= sampleBiasGlobal2D(									\
+			material_texture_##material_postfix,										\
+			transform_texcoord(blend_texcoord, material_texture_##material_postfix##_xform)).xy;	\
+	}																					\
 	blend_specular_parameters(															\
 		blend_amount,																	\
 		specular_tint_##material_postfix,												\
 		albedo_specular_tint_blend_##material_postfix,									\
 		specular_power_##material_postfix,												\
-		specular_coefficient_##material_postfix,										\
+		mt_rg_##material_postfix.x,														\
 		analytical_specular_contribution_##material_postfix,							\
 		area_specular_contribution_##material_postfix,									\
 		environment_specular_contribution_##material_postfix,							\
 		fresnel_curve_steepness_##material_postfix,										\
-		specular)
+		mt_rg_##material_postfix.y,														\
+		specular);																		\
+}
 
 
 void blend_specular_parameters(
@@ -978,16 +1057,18 @@ void blend_specular_parameters(
 	in float area_specular_contribution,
 	in float environment_specular_contribution,
 	in float fresnel_steepness,
+	in float roughness,
 	inout specular_parameters specular)
 {
 	specular.normal_albedo.rgb		+= blend_amount * specular_tint * (1.0 - albedo_specular_tint_blend);
 	specular.normal_albedo.w		+= blend_amount * albedo_specular_tint_blend;
-	
+
 	specular.power					+= blend_amount * specular_power;
+	specular.roughness				+= blend_amount * roughness;
 	specular.analytical				+= blend_amount * specular_coefficient * analytical_specular_contribution;			// ###ctchou $PERF can move specular_coefficient outside this blend
 	specular.area					+= blend_amount * specular_coefficient * area_specular_contribution;
 	specular.envmap					+= blend_amount * specular_coefficient * environment_specular_contribution;
-		
+
 	specular.fresnel_steepness		+= blend_amount * fresnel_steepness;
 	specular.weight					+= blend_amount;
 }
@@ -1051,6 +1132,7 @@ void blend_surface_parameters(
 	// calculate specular parameters
 	specular.normal_albedo= 0.0f;
 	specular.power= 0.001f * 1.0f;				// default power is 1.0, default weight is 0.001
+	specular.roughness= 0.001f * 1.0f;			// default roughness matches power 1.0 (fully rough)
 	specular.analytical= 0.0f;
 	specular.area= 0.0f;
 	specular.envmap= 0.0f;
@@ -1060,25 +1142,26 @@ void blend_surface_parameters(
 	#if SPECULAR_MATERIAL_COUNT > 0
 	{	
 		#if SPECULAR_MATERIAL(material_0_type)
-			BLEND_SPECULAR(m_0, blend.x, specular);
+			BLEND_SPECULAR(m_0, blend.x, specular, texcoord);
 		#endif
-		
+
 		#if SPECULAR_MATERIAL(material_1_type)
-			BLEND_SPECULAR(m_1,	blend.y, specular);
+			BLEND_SPECULAR(m_1,	blend.y, specular, texcoord);
 		#endif
-		
+
 		#if SPECULAR_MATERIAL(material_2_type)
-			BLEND_SPECULAR(m_2, blend.z, specular);
+			BLEND_SPECULAR(m_2, blend.z, specular, texcoord);
 		#endif
-		
+
 		#if SPECULAR_MATERIAL(material_3_type)
-			BLEND_SPECULAR(m_3, blend.w, specular);
+			BLEND_SPECULAR(m_3, blend.w, specular, texcoord);
 		#endif
-		
+
 		// divide out specular weight for 'specular only weighted-blend'
 		float scale= 1.0f / max(specular.weight, 0.001f);		// ###ctchou $PERF don't think we need the max()
 		specular.fresnel_steepness *= scale;
 		specular.power *= scale;
+		specular.roughness *= scale;
 	}
 	#endif
 }
@@ -1195,6 +1278,17 @@ accum_pixel static_lighting_shared_ps(
 
 		float n_dot_v			= dot( bump_normal, view_dir );
 
+#if TERRAIN_GGX
+		calc_ggx_outgoing_light(
+			bump_normal,
+			view_dir,
+			view_reflect_dir,
+			n_dot_v,
+			specular.roughness,			// blended per-pixel (material_texture) / power-derived fallback
+			analytical_light_dir,
+			analytical_light_intensity,
+			analytical_specular_light);
+#else
 		calc_phong_outgoing_light(
 			bump_normal,
 			view_dir,
@@ -1204,6 +1298,7 @@ accum_pixel static_lighting_shared_ps(
 			analytical_light_dir,
 			analytical_light_intensity,
 			analytical_specular_light);
+#endif
 
 		area_specular_light= ravi_order_3(view_reflect_dir, sh_lighting_coefficients);
 		area_specular_light= max(0.0f, area_specular_light);
@@ -1217,7 +1312,7 @@ accum_pixel static_lighting_shared_ps(
 			view_dir,
 			bump_normal,
 			view_reflect_dir,
-			float4(1.0f, 1.0f, 1.0f, max(0.01f, 1.01 - specular.power / 200.0f)),		// convert specular power to roughness (cheap and bad approximation)
+			float4(1.0f, 1.0f, 1.0f, max(0.01f, specular.roughness)),		// blended per-pixel roughness (== power-derived when material_texture off)
 			area_specular_light);
 
 	#endif
@@ -1242,7 +1337,7 @@ accum_pixel static_lighting_shared_ps(
 	// halo3-ng: roughness passthrough for SSR cone tracing
 #ifdef ACCUM_PIXEL_HAS_ROUGHNESS
 	#if SPECULAR_MATERIAL_COUNT > 0
-		g_roughness_passthrough = max(0.01f, 1.01 - specular.power / 200.0f);
+		g_roughness_passthrough = max(0.01f, specular.roughness);
 	#else
 		g_roughness_passthrough = 0.75f;  // non-specular terrain: rock/dirt default
 	#endif
@@ -1698,6 +1793,17 @@ accum_pixel dynamic_light_ps(
 		analytic_diffuse_radiance= light_radiance * dot(fragment_to_light, bump_normal) * diffuse_albedo.rgb;
 		
 		#if SPECULAR_MATERIAL_COUNT > 0
+		#if TERRAIN_GGX
+			calc_ggx_outgoing_light(
+				bump_normal,
+				view_dir,
+				view_reflect_dir,
+				n_dot_v,
+				specular.roughness,		// blended per-pixel (material_texture) / power-derived fallback
+				fragment_to_light,
+				light_radiance,
+				analytic_specular_radiance);
+		#else
 			calc_phong_outgoing_light(
 				bump_normal,
 				view_dir,
@@ -1707,6 +1813,7 @@ accum_pixel dynamic_light_ps(
 				fragment_to_light,
 				light_radiance,
 				analytic_specular_radiance);
+		#endif
 		#endif
 	
 		// calculate shadow
