@@ -399,6 +399,15 @@ struct decorator_pixel
 #endif
 #ifdef ACCUM_PIXEL_HAS_ROUGHNESS
 	float  roughness       : SV_Target4;  // PBR roughness — halo3-ng SSR
+	// Decorator stamp v2 (Aug 2026): dedicated RT (ResourceDecoratorStamp, R16G16_FLOAT via
+	// [ShaderRegexBindMVRT] o5). The old _mv_gap.zw stamp was structurally broken: o2.w is an
+	// ALPHA channel, and the global blend state's alpha equation zeroed every .w write, so the
+	// stamp depth never arrived (this is why every depth-validated composite variant rejected
+	// visible decorators). R16G16 has COLOR channels only — both blend with the color equation,
+	// scaled by the SAME alpha factor -> homogeneous, stamp.y/stamp.x recovers exact rawDepth.
+	// Exclusive by write mask: no other forward PS declares SV_Target5.
+	// (Nested in ROUGHNESS so o4 is always declared beneath o5 — fxc compacts output gaps.)
+	float2 stamp           : SV_Target5;
 #endif
 };
 #endif
@@ -437,20 +446,21 @@ default_ps(
 
 	texcoord= sampleBiasGlobal2D(diffuse_texture, texcoord.xy);								// ###HACK warning: I should use a new variable to hold the albedo sample, but re-using texcoord makes the stupid HLSL compiler generate one less GPR
 
-	// halo3-ng: forward-integrated AO/SSGI — applied to diffuse (albedo*light) only,
-	// before inscatter is added so fog isn't darkened by AO. Engine fog attenuates AO/GI
-	// naturally downstream — no internal fog-fade in the helper.
-	// MV: the per-vertex camera MV computed in the VS (foliage parity) — reprojects the
-	// AO/GI/SSS the consumer samples. Replaces the broken PS-side DECORATOR_SOFT_CONSUMER
-	// derivation. 0 fallback on the non-MV (Xbox) path.
+	// halo3-ng (July 2026, zero-lag Stage 1.5): decorators NO LONGER consume AO/GI/SSS in-shader.
+	// They draw inside the albedo PRE-PASS (frame analysis July 25: decorator draws at 101+ of
+	// the frame, before the effect chain's boundary anchor), so any in-shader consumption is
+	// structurally one frame stale — under the zero-lag hook that read back blade-level self-AO
+	// noise from the decorator-inclusive boundary depth. Their AO is now applied at DISPLAY time
+	// in final_composite_base.hlsl, masked to decorator pixels via the boundary-DSV vs
+	// SV_Target3 depth difference, using the CURRENT frame's AO buffer (zero-lag by
+	// construction). The VS-computed camera MV (TEXCOORD5) is retained — the o2 MV write below
+	// still feeds the compute temporals.
 #if defined(pc) && defined(ACCUM_PIXEL_HAS_MV)
 	float2 decorator_mv = motion_vector;
 #else
 	float2 decorator_mv = float2(0.0f, 0.0f);
 #endif
 	float3 diffuse_lit = texcoord.rgb * light.rgb;
-	apply_ao_ssgi_inline(diffuse_lit, texcoord.rgb, normal, screen_position.xy, decorator_mv, screen_position.z,
-		world_position);
 	float4 color = float4(diffuse_lit + inscatter.rgb, texcoord.a);
 
 #if DX_VERSION == 11
@@ -474,11 +484,26 @@ default_ps(
 	// AO/GI/SSS history couldn't track under camera motion (the "decorators lag worse" bug). The
 	// consumer is unaffected (it reads the motion_vector PARAM, not this buffer) -> no double-reproj.
 	// Name stays _mv_gap (the fxc-compaction gap-filler); non-zero keeps it o2, o3 depth unchanged.
-	pix._mv_gap         = float4(decorator_mv, 0.0f, 0.0f);
+	// .z = 1.0 (July 25 2026): DECORATOR STAMP for the display-time AO composite in
+	// final_composite_base.hlsl. Every other forward PS declares SV_Target2 as float2, so their
+	// write mask can never touch .z — the stamp is exclusive to decorators by construction, and
+	// the per-frame MV clear zeroes it. (The depth-difference classifier it replaces was void:
+	// decorator depth reaches BOTH the DSV path and SV_Target3 — rawDepth below — so the two
+	// depth buffers are equal at decorator pixels.)
+	// .w = the decorator's OWN raw depth: the composite validates the stamp against
+	// the final SV_Target3 depth, so opaque occluders drawn over a stamped pixel (FP weapon,
+	// characters) overwrite SV_Target3 with their depth, the values disagree, and the stamp is
+	// rejected. Without this the stamp means "a decorator drew here at SOME point this frame" —
+	// the write-mask exclusivity that protects .z from other draws also stops them clearing it.
+	pix._mv_gap         = float4(decorator_mv, 1.0f, screen_position.z);
 	pix.rawDepth        = screen_position.z;
 #endif
 #ifdef ACCUM_PIXEL_HAS_ROUGHNESS
 	pix.roughness = 0.75f;  // vegetation/ground cover: diffuse-like (matches terrain non-specular default)
+	// Stamp v2: .x = presence flag, .y = raw depth. Both arrive x blendFactor (color equation)
+	// -> homogeneous; the resolve decodes depth as .y/.x. See struct comment. The _mv_gap.zw
+	// stamp above is retained but DEAD (alpha-equation blending zeroes .w — see struct comment).
+	pix.stamp = float2(1.0f, screen_position.z);
 #endif
 	return pix;
 #else

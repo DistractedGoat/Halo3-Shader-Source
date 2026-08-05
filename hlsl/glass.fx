@@ -339,8 +339,11 @@ accum_pixel dynamic_light_ps(
 	)
 {
 #ifdef ACCUM_PIXEL_HAS_MV
-	g_motion_vector_passthrough.xy = motion_vector;
-	g_raw_depth_passthrough        = fragment_position.z;
+	// halo3-ng (Aug 2026): additive-identity discipline (lesson #14) — dynamic light passes
+	// run with the additive blend state which applies to every MRT; real depth/MV here ADD
+	// onto SV_Target2/3 per light (reverse-Z depth reads NEARER). See entry_points.fx.
+	g_motion_vector_passthrough.xy = 0.0f;
+	g_raw_depth_passthrough        = 0.0f;
 #endif
 	float4 out_color= float4(1.0f, 1.0f, 1.0f, 1.0f);
 	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(out_color, true, false);

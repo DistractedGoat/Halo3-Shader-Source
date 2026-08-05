@@ -173,12 +173,15 @@ accum_pixel dynamic_light_ps(
 {
 	float4 out_color= float4(1.0f, 1.0f, 1.0f, 1.0f);
 #ifdef ACCUM_PIXEL_HAS_MV
-	g_motion_vector_passthrough.xy = motion_vector;
-	g_raw_depth_passthrough        = fragment_position.z;
+	// halo3-ng (Aug 2026): additive-identity discipline (lesson #14) — dynamic light passes
+	// run with the additive blend state which applies to every MRT. Zero all passthroughs so
+	// the static pass's depth/MV/roughness survive (real values here ADD per light: depth
+	// reads NEARER in reverse-Z, roughness saturates — see entry_points.fx).
+	g_motion_vector_passthrough.xy = 0.0f;
+	g_raw_depth_passthrough        = 0.0f;
 #endif
-	// halo3-ng: roughness passthrough for SSR cone tracing (organic skin)
 #ifdef ACCUM_PIXEL_HAS_ROUGHNESS
-	g_roughness_passthrough = 0.55f;
+	g_roughness_passthrough = 0.0f;
 #endif
 	return CONVERT_TO_RENDER_TARGET_FOR_BLEND(out_color, true, false);
 }

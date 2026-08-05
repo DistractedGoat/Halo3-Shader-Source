@@ -56,6 +56,12 @@ Texture2D<float> debug_depth_tex : register(t9);
 // so engine's `out_color * extinction + inscatter` attenuates SSS the same way it
 // attenuates AO/SSGI. Old ps-t11 bind + composite-time multiply deleted.
 
+// halo3-ng (July 25 2026): the decorator display-time AO composite that briefly lived here
+// MOVED to the 3DMigoto side — [CustomShaderDecoratorAOResolve] + decorator_ao_resolve_ps.hlsl,
+// a fullscreen multiply at the opaque -> transparent boundary. Applying it here (end of frame)
+// darkened every translucent blended over stamped pixels in between; the boundary pass makes
+// the ordering correct by construction. final_composite is tonemap-only again.
+
 // SSR removed from final_composite — now injected per-surface (water_shading.fx etc.)
 
 // define default functions, if they haven't been already

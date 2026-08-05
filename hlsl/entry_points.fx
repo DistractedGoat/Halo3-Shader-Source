@@ -1720,10 +1720,19 @@ accum_pixel default_dynamic_light_ps(
 	g_roughness_passthrough = 0.0f;
 #endif
 #ifdef ACCUM_PIXEL_HAS_DEPTH
-	g_raw_depth_passthrough = vsout.position.z;
+	// halo3-ng (Aug 2026): ZERO, not the real depth — additive-identity discipline, same as
+	// the roughness fix above. This pass runs with the additive blend state, which applies to
+	// EVERY MRT (lesson #14): writing the real rawDepth here ADDS it onto SV_Target3, so a
+	// pixel lit by N dynamic lights accumulates rawDepth*(1+N) — in reverse-Z that reads as
+	// NEARER (vz/(1+N)). Contaminated ResourceCurrentDepthCopy -> ResourceDepthSnapshot ->
+	// every screen-space effect's depth was wrong inside dynamic light volumes, and the
+	// decorator AO resolve's one-sided occlusion test hard-rejected all stamps there (the
+	// "no-AO patch near the hidden pool" bug — the patch was the light's coverage area).
+	g_raw_depth_passthrough = 0.0f;
 #endif
 #ifdef ACCUM_PIXEL_HAS_MV
-	g_motion_vector_passthrough.xy = vsout.motion_vector;
+	// Same discipline: additive MV write double-counts motion on lit pixels. Zero = identity.
+	g_motion_vector_passthrough.xy = 0.0f;
 #endif
 	return convert_to_render_target(out_color, true, true);
 }
