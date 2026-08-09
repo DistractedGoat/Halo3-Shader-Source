@@ -16,6 +16,13 @@ Copyright (c) Microsoft Corporation, 2005. all rights reserved.
 #if defined(pc) && (DX_VERSION == 11) && defined(PIXEL_SHADER)
 Texture2D<float4> ssr_direct : register(t19);
 Texture2D<float4> prev_vp_direct : register(t20);
+// 3DMigoto IniParams (reserved slot t120). Row 7 .y = $ssr_reproj_off.
+// Sense is deliberately INVERTED so the fail-safe default is the legacy behaviour: an unbound
+// t120 (no 3DMigoto, or before the first IniParams write) Loads as 0 = reprojection ON, which
+// is exactly what the old unconditional `[branch] if (true)` did. 1 disables it.
+// Diagnostic for the "reflection tracks the camera faster than it should" symptom: if the
+// motion stops with this at 1, the prev-VP reprojection is the fault, not the sampling space.
+Texture1D<float4> water_ssr_iniparams : register(t120);
 #endif
 
 /* vertex shader implementation */
@@ -969,7 +976,11 @@ color_reflection= environment_sample.rgb * alpha;
 			float2 ssr_uv = texcoord_ss;
 
 			float4 prevVP_r0 = prev_vp_direct.Load(int3(0, 0, 0));
-			if (prevVP_r0.x != 0.0f || prevVP_r0.y != 0.0f || prevVP_r0.z != 0.0f || prevVP_r0.w != 0.0f)
+			// $ssr_reproj_off (IniParams (7,0).y, Shift+F11): 0 = reproject (legacy), 1 = skip.
+			// Gates ONLY the reprojection - ssr_uv keeps its texcoord_ss initialiser, so SSR
+			// still renders. (An earlier version gated the whole block and just turned SSR off.)
+			if ((water_ssr_iniparams.Load(int2(7, 0)).y < 0.5f) &&
+			    (prevVP_r0.x != 0.0f || prevVP_r0.y != 0.0f || prevVP_r0.z != 0.0f || prevVP_r0.w != 0.0f))
 			{
 				float4x4 prevVP = float4x4(
 					prevVP_r0,
@@ -984,11 +995,38 @@ color_reflection= environment_sample.rgb * alpha;
 					float2 prevNDC = prevClip.xy / prevClip.w;
 					float2 prevUV = prevNDC * float2(0.5f, -0.5f) + 0.5f;
 					prevUV = k_water_player_view_constant.xy + prevUV * k_water_player_view_constant.zw;
-					ssr_uv = prevUV;
+					// saturate: hold the edge sample when the reprojection lands off-screen,
+					// instead of letting the Load run out of range and return 0. This matches
+					// what the other two SSR consumers already do —
+					// environment_mapping.fx:61 `saturate(screen_uv - g_ssr_motion_vector)` and
+					// glass.fx:266 `saturate(curr_uv - motion_vector)` — so world geometry, glass
+					// and water now behave the same at the screen edge.
+					// WHY IT MATTERS: while panning, the newly revealed edge has no prior-frame
+					// SSR. Unclamped, water's reflection FADED OUT there while glass and world
+					// geometry held theirs, which reads as the reflection falling away from the
+					// edge of the screen. Holding the edge texel is the lesser artefact.
+					ssr_uv = saturate(prevUV);
 				}
 			}
 
-			float4 ssr_val= ssr_direct.Load(int3(ssr_uv * float2(1920.0f, 1080.0f), 0));
+			// Resolution independence (Aug 2026): ResourceSSRFinal is render-res, not 1920x1080.
+			// REVERTED from calc_viewport_pixel_coords_from_uv() — that regressed 1080p, which
+			// proves ps_global_viewport_res is NOT this buffer's size even on a full-screen
+			// viewport (it and ps_global_render_resolution are distinct constants,
+			// global_registers.fx:9 vs :16). Scale by the buffer's own size, as before.
+			uint wssr_w, wssr_h;
+			ssr_direct.GetDimensions(wssr_w, wssr_h);
+			float2 wssr_size = float2(max(wssr_w, 1u), max(wssr_h, 1u));
+			// ssr_uv is saturated at the reprojection site above, so this Load is always in range.
+			// (It used to be deliberately unclamped so an off-screen reprojection returned 0 and
+			// the lerp became a no-op — but that made water's reflection fade out at the newly
+			// revealed screen edge while glass and world geometry held theirs. See above.)
+			// min() on the INDEX, not on the uv scale: uv * size maps [0,1] -> [0,size], so uv==1
+			// yields index `size` which is one past the last texel. Clamping the resulting index
+			// keeps the original uv->texel mapping bit-exact everywhere else (scaling by size-1
+			// instead would skew every sample by a fraction of a pixel).
+			int2 ssr_texel = min(int2(saturate(ssr_uv) * wssr_size), int2(wssr_size) - 1);
+			float4 ssr_val= ssr_direct.Load(int3(ssr_texel, 0));
 			//SSR controls
 			// halo3-ng (June 2026): LINEAR, energy-conserving. A reflection must never carry MORE
 			// energy than the surface it reflects — but pow(x,1.2) is super-linear (x^1.2 > x for x>1),

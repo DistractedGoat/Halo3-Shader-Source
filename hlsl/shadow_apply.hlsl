@@ -10,9 +10,78 @@
 #include "atmosphere.fx"
 #include "shadow_apply_registers.fx"
 
-#ifndef SAMPLE_PERCENTAGE_CLOSER
+// halo3-ng (Aug 2026) — UNIFIED FILTER + BIAS ACROSS ALL FIVE APPLY VARIANTS.
+//
+// shadow_apply_{point,faster,bilinear,fancy}.hlsl each #define SAMPLE_PERCENTAGE_CLOSER *and*
+// FASTER_SHADOWS BEFORE including this file, so the #ifndef guard that used to be here never
+// fired for them, and the slope-scaled depth bias below (~line 270) was compiled out entirely.
+//
+// That matters more than it looks: RenderDoc analysis of the 10 captures in
+// docs/research/renderdoc-captures/ shows MCC runs THREE DISTINCT apply pixel shaders in a
+// single frame (in 4 of the 10) — i.e. filter quality and depth bias were changing from object
+// to object inside one image. Force one policy for all of them.
+//
+// The variants still declare + define their own kernel functions around the #include; those
+// simply become unreferenced now. They are defined AFTER this header and reference
+// g_shadow_pixel_size (declared ~line 110), so they still compile.
+#ifdef SAMPLE_PERCENTAGE_CLOSER
+#undef SAMPLE_PERCENTAGE_CLOSER
+#endif
 #define SAMPLE_PERCENTAGE_CLOSER sample_percentage_closer_PCF_5x5_block
-#endif // SAMPLE_PERCENTAGE_CLOSER
+
+// Restore the slope-scaled depth bias for every variant. Scalable at runtime via
+// $shadow_bias_scale so the peter-panning risk this reintroduces can be A/B'd on F10 without a
+// rebuild (set it to 0.001 to get the old FASTER_SHADOWS "no bias" behaviour back).
+#ifdef FASTER_SHADOWS
+#undef FASTER_SHADOWS
+#endif
+
+// halo3-ng — runtime tuning knobs via 3DMigoto IniParams (t120), ROW 8.
+// Row 8 already exists ($tonemap_toe on .x), so these reuse free channels of a LIVE texel and
+// dodge the documented trap that a BRAND-NEW IniParams index does not reach the shader on a live
+// F10 (the texture only resizes in CreateIniParamResources on reload).
+//   .x = $tonemap_toe         final_composite_base.hlsl — not read here
+//   .y = $shadow_fade_start   volume-depth at which the distance fade begins   (default 0.80)
+//   .z = $shadow_debug        0 = off, 1 = per-variant tint, 2 = shadow_alpha  (default 0)
+//   .w = $shadow_bias_scale   multiplier on the slope-scaled depth bias        (default 1.0)
+// ROW 8 AND NOT ROW 7: row 7's .y is $ssr_reproj_off (Aug 2026, concurrent SSR/dynamic-resolution
+// work). z7/w7 are left free so that effort can grow into its own texel.
+// FALLBACK: with no 3DMigoto (or before the first publish) Load() returns 0 and each accessor
+// below substitutes its default, which reproduces the intended behaviour rather than a zero.
+Texture1D<float4> shadow_iniparams : register(t120);
+
+float shadow_fade_start()
+{
+	float v = shadow_iniparams.Load(int2(8, 0)).y;
+	return (v < 0.05f || v > 0.99f) ? 0.80f : v;			// guard an unset / absurd slot
+}
+float shadow_bias_scale()
+{
+	float v = shadow_iniparams.Load(int2(8, 0)).w;
+	return (v <= 0.0f) ? 1.0f : v;						// 0 (unset) -> 1.0
+}
+float shadow_debug_mode()
+{
+	return shadow_iniparams.Load(int2(8, 0)).z;
+}
+
+// halo3-ng — ShaderRegex anchors. Never read (the guard at the use site is never true); they
+// exist only to force a `dcl_resource_texture2d ... t100` / `t101` into the compiled DXBC so
+// d3dx.ini can identify these draws by DECLARATION instead of by hash. Necessary because:
+//   * the apply PS's real declaration set {s1, t0, t1, t2} collides with 1622 shader families
+//     (tools/dxbc_fingerprint.py preflight --stage ps --samp 1 --tex 0 --tex 1 --tex 2),
+//   * t100/t101 are free across all 4198 blobs in the corpus (--tex 100 -> 0 matches), and
+//   * hashes rotate every time this file is touched, and there are five live variants.
+// Two anchors so projected shadows (default_ps) and ellipsoid blob shadows (albedo_ps) can be
+// hooked independently.
+Texture2D<float4> ng_shadow_apply_anchor : register(t100);		// default_ps — projected shadows
+Texture2D<float4> ng_shadow_blob_anchor  : register(t101);		// albedo_ps  — ellipsoid blobs
+
+// halo3-ng — colour identity for $shadow_debug == 1. The four wrapper variants override this
+// BEFORE the #include; this is the fallback for shadow_apply.hlsl compiled directly.
+#ifndef SHADOW_VARIANT_TINT
+#define SHADOW_VARIANT_TINT float3(1.0f, 0.0f, 1.0f)			// magenta = shadow_apply (base)
+#endif
 
 LOCAL_SAMPLER_2D_IN_VIEWPORT_ALLWAYS(zbuffer, 0);
 LOCAL_SAMPLER_2D(shadow, 1);
@@ -173,17 +242,29 @@ accum_pixel default_ps(
 	float3 normal_world_space= normal_buffer.t.Load(int3(texture_pos, 0)).xyz * 2.0f - 1.0f;										// ###ctchou $PERF bias this in the texture format
 	float cosine= dot(normal_world_space, SHADOW_DIRECTION_WORLDSPACE.xyz);
 
-	float shadow_falloff= saturate(fragment_shadow_projected.z*2-1);													// shift z-depth falloff to bottom half of the shadow volume (no depth falloff in top half)
-	shadow_falloff *= shadow_falloff;																					// square depth
-	
 #ifdef DOUBLE_COSINE
 	float cosine_falloff= saturate(cosine) * saturate(cosine);
 #else
 	float cosine_falloff= saturate(cosine);
 #endif
-	
-	float shadow_darkness= k_ps_constant_shadow_alpha.r * (1-shadow_falloff*shadow_falloff) * cosine_falloff;			// z_depth_falloff= 1 - (shifted_depth)^4,    incident_falloff= cosine lobe
-	
+
+	// halo3-ng (Aug 2026) — DISTANCE FADE. Vanilla was:
+	//     f = saturate(z*2-1); f *= f;  strength = alpha * (1 - f*f) * cosine
+	// i.e. 1 - (2z-1)^4 in SHADOW-VOLUME depth. Because the volume is fitted to the CASTER, its
+	// midpoint sits roughly one caster-height above the ground, so the shadow was already ~41%
+	// gone by z=0.9 — before it properly reached the floor. That is the "shadows fade out with
+	// distance" symptom; it is not a camera-distance term at all.
+	//
+	// The falloff's LEGITIMATE job is reaching exactly 0 at the volume's far plane so the shadow
+	// doesn't terminate on a hard edge. A narrow smootherstep band does that job BETTER, not
+	// worse: vanilla arrives at z=1 with slope -8, smootherstep arrives with zero first AND
+	// second derivative. Containment is unchanged — both are identically 0 for z >= 1.
+	float fade_start= shadow_fade_start();																				// $shadow_fade_start (IniParams y7, default 0.80)
+	float ft= saturate((fragment_shadow_projected.z - fade_start) / max(1.0f - fade_start, 1e-3f));
+	float shadow_falloff= ft*ft*ft*(ft*(ft*6.0f - 15.0f) + 10.0f);														// smootherstep
+
+	float shadow_darkness= k_ps_constant_shadow_alpha.r * (1.0f - shadow_falloff) * cosine_falloff;
+
 	float darken= 1.0f;
 #ifndef pc
 	[predicateBlock]
@@ -217,8 +298,10 @@ accum_pixel default_ps(
 #endif // FASTER_SHADOWS
 
 		float half_pixel_size= SHADOW_PIXELSIZE;													// the texture coordinate distance from the center of a pixel to the corner of the pixel
-		float depth_bias= slope * half_pixel_size;
-			
+		// halo3-ng: runtime-scalable so the peter-panning risk from re-enabling this bias on the
+		// _point/_faster/_bilinear/_fancy variants can be A/B'd on F10. 0.001 ~= bias off.
+		float depth_bias= slope * half_pixel_size * shadow_bias_scale();
+
 		// sample shadow depth
 		float percentage_closer= SAMPLE_PERCENTAGE_CLOSER(fragment_shadow_projected.xyz, depth_bias);
 		
@@ -227,13 +310,34 @@ accum_pixel default_ps(
 		// halo3-ng: removed darken *= darken (squaring crushed soft shadow penumbra gradients)
 	}
 
-	//return convert_to_render_target(float4(shadow_darkness, 0.0, 0.0, 0.0), false, true);
+	// halo3-ng: ShaderRegex anchor keep-alive. Never taken — k_ps_constant_shadow_alpha.r is a
+	// shadow ALPHA in [0,1] — but it is a runtime cbuffer read, so fxc cannot fold the branch away
+	// and the t100 declaration survives into RDEF. Do NOT replace the condition with `always_true`
+	// (#define always_true true on DX11 — a literal, which fxc WOULD fold, silently deleting the
+	// anchor and killing the d3dx.ini hook).
+	if (k_ps_constant_shadow_alpha.r < -1.0e30f)
+	{
+		darken += ng_shadow_apply_anchor.Load(int3(0, 0, 0)).r;
+	}
 
 	// compute inscatter
 	float3 inscatter= -pixel_depth * INSCATTER_SCALE + INSCATTER_OFFSET;
-	
+
+	// halo3-ng — $shadow_debug (IniParams z7). The engine's blend adds inscatter*(1-darken), so a
+	// tint written here is visible ONLY inside this draw's shadow footprint, and overlapping
+	// shadow groups read as the SUM of their tints — which is exactly the diagnostic we want.
+	//   1 = per-variant tint: which of the five compiled apply variants drew this shadow.
+	//   2 = shadow_darkness (i.e. k_ps_constant_shadow_alpha * fades) as greyscale — tells us
+	//       whether the ENGINE is ramping shadow alpha down with distance, which is the one part
+	//       of "shadows fade at distance" that is NOT fixable in this shader.
+	float dbg= shadow_debug_mode();
+	if (dbg > 0.5f)
+	{
+		inscatter= (dbg < 1.5f) ? (SHADOW_VARIANT_TINT * 0.35f) : float3(shadow_darkness, shadow_darkness, shadow_darkness);
+	}
+
 	//return convert_to_render_target(float4(normal_world_space, 0.0), false, true);
-	
+
 	// the destination contains (pixel * extinction + inscatter) - we want to change it to (pixel * darken * extinction + inscatter)
 	// so we multiply by darken (aka src alpha), and add inscatter * (1-darken)
 	return convert_to_render_target(float4(inscatter * g_exposure.rrr, darken), false, true);		// Note: the (inscatter*(1-darken)) clamping is not correct, but only when the inscatter is HDR already - in which case you can't see anything anyways
@@ -341,6 +445,14 @@ accum_pixel albedo_ps(
 	float3 normal_world_space= normal_buffer.t.Load(int3(texture_pos, 0)).xyz * 2.0f - 1.0f;										// ###ctchou $PERF bias this in the texture format
 	float cosine= dot(normal_world_space, SHADOW_DIRECTION_WORLDSPACE.xyz);
 	float shadow_darkness= k_ps_constant_shadow_alpha.r * saturate(0.6f + 0.4f * cosine);			// z_depth_falloff= 1 - (shifted_depth)^4,    incident_falloff= cosine lobe
+
+	// halo3-ng: t101 ShaderRegex anchor keep-alive (see the t100 note in default_ps). Separate
+	// slot so the ellipsoid BLOB shadows can be hooked independently of the projected ones —
+	// they are a different visibility term and may or may not belong in the unified mask.
+	if (k_ps_constant_shadow_alpha.r < -1.0e30f)
+	{
+		shadow_darkness += ng_shadow_blob_anchor.Load(int3(0, 0, 0)).r;
+	}
 
 	//float shadow_darkness= k_ps_constant_shadow_alpha.r * 0.8;
 	

@@ -30,6 +30,26 @@ static float2 g_ssr_screen_uv    = float2(0.0f, 0.0f);
 static float2 g_ssr_motion_vector= float2(0.0f, 0.0f);
 Texture2D<float4> ssr_buffer : register(t19);
 
+// halo3-ng RESOLUTION INDEPENDENCE (Aug 2026). ResourceSSRFinal is now allocated at the render
+// resolution (width_multiply 1.0 off the render target) instead of a hardcoded 1920x1080, so the
+// pixel<->UV conversions around it must ask the resource rather than assume.
+//
+// Unlike the AO/GI/SSS consumer — which must use IniParams because its inputs are toggled off by
+// keybind — ssr_buffer is the very resource being sampled here, so GetDimensions() is both the
+// most direct source and automatically self-consistent: g_ssr_screen_uv is built by dividing by
+// this size in entry_points.fx / cortana.fx and multiplied back by it in get_ssr() below, so the
+// round trip cancels exactly whatever the size is.
+//
+// max(...,2) guard: if t19 is unbound GetDimensions() returns 0, which would make the
+// `int2(size) - 2` clamp bound go negative (undefined). At 2 the clamp collapses to texel 0,
+// whose Load() on an unbound SRV is 0 -> ibr.a == 0 -> apply_ssr_blend is a no-op. Safe.
+float2 get_ssr_buffer_size()
+{
+    uint ssr_w, ssr_h;
+    ssr_buffer.GetDimensions(ssr_w, ssr_h);
+    return float2(max(ssr_w, 2u), max(ssr_h, 2u));
+}
+
 // Returns ResourceSSRFinal sample: .rgb = HDR reflected scene color (pre-multiplied by g_exposure),
 // .a = blend confidence [0..1] (0 = no hit / full miss, 1 = reliable hit).
 float4 get_ssr(float2 screen_uv, float3 normal)
@@ -41,7 +61,7 @@ float4 get_ssr(float2 screen_uv, float3 normal)
     float2 reproj_uv = saturate(screen_uv - g_ssr_motion_vector);
 
     // Bilinear 4-tap (Load-based): kills integer-snap judder on subpixel reprojection.
-    const float2 viewport_size = float2(1920.0f, 1080.0f);
+    const float2 viewport_size = get_ssr_buffer_size();
     float2 reproj_pix_f = reproj_uv * viewport_size - 0.5f;
     float2 pix_floor    = floor(reproj_pix_f);
     float2 frac         = saturate(reproj_pix_f - pix_floor);

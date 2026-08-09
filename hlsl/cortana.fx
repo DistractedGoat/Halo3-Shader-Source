@@ -226,7 +226,8 @@ float4 calc_output_color_with_explicit_light_quadratic(
 	//compute environment map
 	envmap_area_specular_only= max(envmap_area_specular_only, 0.001f);
 #ifdef ENABLE_SSR
-	g_ssr_screen_uv     = fragment_position / float2(1920.0f, 1080.0f);
+	// Resolution independence (Aug 2026) — see entry_points.fx.
+	g_ssr_screen_uv     = fragment_position / get_ssr_buffer_size();
 	g_ssr_motion_vector = motion_vector;
 	g_roughness_passthrough = derive_legacy_roughness(envmap_specular_reflectance_and_roughness.w, specular_mask);
 #endif

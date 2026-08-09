@@ -7,6 +7,9 @@
 #define SAMPLE_PERCENTAGE_CLOSER sample_percentage_closer_PCF_5x5_block_predicated
 float sample_percentage_closer_PCF_5x5_block_predicated(float3 fragment_shadow_position, float depth_bias);
 
+
+// halo3-ng: identity for the $shadow_debug == 1 variant probe (see shadow_apply.hlsl).
+#define SHADOW_VARIANT_TINT float3(1.0f, 1.0f, 0.0f)    // YELLOW = _fancy
 #include "shadow_apply.hlsl"
 
 

@@ -372,6 +372,19 @@ void default_vs(
 
 #ifdef pc
 	out_inscatter.w= out_position.w;
+	// halo3-ng: the RAW geometric normal, deliberately.
+	//
+	// REJECTED (Aug 7 2026, tried and reverted): writing a camera-facing
+	// `world_normal * sign(dot(world_normal, fragment_to_camera_world))` here, on the theory that
+	// back-facing card pixels hand the screen-space consumers an inverted normal. In-game it made
+	// NO observable difference (the ivy/grass cards in question face outward toward the viewer, so
+	// the flip was a no-op on them), and it is actively harmful in principle: the flip is
+	// PER-VERTEX, decorator normals are deliberately dome-like (see the note ~line 320), so
+	// neighbouring vertices of a tuft can land on opposite sides of the sign() and the interpolated
+	// normal sweeps through zero mid-triangle. It also makes the stored normal CAMERA-DEPENDENT,
+	// which makes anything derived from N·L shift and snap as the camera moves.
+	// If a two-sided flip is ever genuinely needed, do it PER-PIXEL at consumption, where the view
+	// vector is exact, not per-vertex at write time.
    out_normal = world_normal;
 #endif // pc
 }
@@ -407,7 +420,25 @@ struct decorator_pixel
 	// scaled by the SAME alpha factor -> homogeneous, stamp.y/stamp.x recovers exact rawDepth.
 	// Exclusive by write mask: no other forward PS declares SV_Target5.
 	// (Nested in ROUGHNESS so o4 is always declared beneath o5 — fxc compacts output gaps.)
-	float2 stamp           : SV_Target5;
+	//
+	// STAMP v3 (Aug 2026): widened to float4 / R16G16B16A16_FLOAT to carry the display-time
+	// composite's missing inputs. .w is STILL an alpha channel and is STILL zeroed by the alpha
+	// equation, so only .xyz are usable — that is exactly the budget needed:
+	//   .x = 1.0     presence flag, and the DENOMINATOR for the homogeneous decode
+	//   .y = viewZ   LINEAR view depth, not raw reverse-Z. fp16 keeps ~0.05% relative precision
+	//                out to 65504, whereas rawDepth = 0.00781/viewZ goes denormal past viewZ
+	//                ~128 m (and ~26 m once scaled by a 0.2 blend factor) — i.e. the v2 stamp was
+	//                already losing depth precision on distant grass.
+	//   .z = fogFrac the AO-modulatable share of the pixel = lum(diffuse_lit)/lum(diffuse_lit +
+	//                inscatter). THE FOG FIX: the RT holds (d+i)*E and we want (d*ao + i)*E, so
+	//                the correct multiply is lerp(1, ao, fogFrac) — AO must not scale inscatter.
+	//                Exposure cancels exactly (both terms get *g_exposure.rrr below).
+	float4 stamp           : SV_Target5;
+	// Linear albedo (the sampled diffuse) for the display-time Patapom per-channel multi-bounce
+	// tint and the Lambertian GI add-back — the terms decorators lost when they stopped calling
+	// apply_ao_ssgi_inline. Same homogeneous trick: decode as aux.rgb / stamp.x. .w dead (alpha).
+	// o6 is exclusive too: no other shader in the corpus declares SV_Target6.
+	float4 aux             : SV_Target6;
 #endif
 };
 #endif
@@ -463,6 +494,21 @@ default_ps(
 	float3 diffuse_lit = texcoord.rgb * light.rgb;
 	float4 color = float4(diffuse_lit + inscatter.rgb, texcoord.a);
 
+	// halo3-ng (Aug 2026) — display-time AO/GI export. Captured HERE, before the exposure
+	// multiply below, so exposure cancels out of the fog ratio and out of the resolve's additive
+	// GI term alike. `light` already carries *extinction (applied per-vertex in the VS at
+	// out_ambient_light.rgb *= extinction), so diffuse_lit is the fogged direct+ambient and
+	// inscatter is the additive haze — the two terms the resolve must treat differently.
+	// dec_-prefixed locals: `pc`/`ps`/`vs` are macro-defined by tool_fast (/Dpc=1) and locals
+	// must not shadow HLSL intrinsics. See CLAUDE.md lessons #20 and #22.
+	const float3 dec_luma  = float3(0.2126f, 0.7152f, 0.0722f);
+	// Luminance scalar rather than per-channel: only 3 usable channels per RT (alpha is blend-
+	// zeroed) and the presence flag + depth claim two. Error scales with the chromaticity gap
+	// between diffuse and inscatter, which is small next to the DC error it replaces.
+	float  dec_fog_frac    = saturate(dot(diffuse_lit, dec_luma) / max(dot(color.rgb, dec_luma), 1e-5f));
+	float  dec_view_z      = 0.00781f / max(screen_position.z, 1e-7f);
+	float3 dec_albedo      = texcoord.rgb;   // the diffuse_texture sample taken above
+
 #if DX_VERSION == 11
 	clip(color.a - k_decorator_alpha_test_threshold);								// alpha clip on D3D11
 #endif
@@ -500,10 +546,12 @@ default_ps(
 #endif
 #ifdef ACCUM_PIXEL_HAS_ROUGHNESS
 	pix.roughness = 0.75f;  // vegetation/ground cover: diffuse-like (matches terrain non-specular default)
-	// Stamp v2: .x = presence flag, .y = raw depth. Both arrive x blendFactor (color equation)
-	// -> homogeneous; the resolve decodes depth as .y/.x. See struct comment. The _mv_gap.zw
-	// stamp above is retained but DEAD (alpha-equation blending zeroes .w — see struct comment).
-	pix.stamp = float2(1.0f, screen_position.z);
+	// Stamp v3: (presence, viewZ, fogFrac) + aux albedo. All arrive x the SAME color-equation
+	// blend factor -> homogeneous; the resolve decodes .y/.x, .z/.x and aux.rgb/.x exactly.
+	// See the struct comment for why each field is here. The _mv_gap.zw stamp above is retained
+	// but DEAD (alpha-equation blending zeroes .w).
+	pix.stamp = float4(1.0f, dec_view_z, dec_fog_frac, 0.0f);
+	pix.aux   = float4(dec_albedo, 0.0f);
 #endif
 	return pix;
 #else

@@ -291,7 +291,9 @@ float4 calc_output_color_with_explicit_light_quadratic(
 #ifdef ENABLE_SSR
 	// Set screen UV + MV + roughness passthrough for SSR blend inside CALC_ENVMAP.
 	// MV reprojects ResourceSSRFinal (prev-frame-aligned) back to the matching sample.
-	g_ssr_screen_uv     = fragment_position / float2(1920.0f, 1080.0f);
+	// Resolution independence (Aug 2026): divide by the SSR buffer's real size. get_ssr()
+	// multiplies by the same value, so the pixel->uv->pixel round trip cancels exactly.
+	g_ssr_screen_uv     = fragment_position / get_ssr_buffer_size();
 	g_ssr_motion_vector = motion_vector;
 #ifdef ACCUM_PIXEL_HAS_ROUGHNESS
 	// Roughness MRT output is only present for geometry with SV_Target4 (not halogram/water/displacement).
@@ -492,7 +494,9 @@ float4 calc_output_color_with_explicit_light_linear_with_dominant_light(
 #ifdef ENABLE_SSR
 	// Set screen UV + MV + roughness passthrough for SSR blend inside CALC_ENVMAP.
 	// MV reprojects ResourceSSRFinal (prev-frame-aligned) back to the matching sample.
-	g_ssr_screen_uv     = fragment_position / float2(1920.0f, 1080.0f);
+	// Resolution independence (Aug 2026): divide by the SSR buffer's real size. get_ssr()
+	// multiplies by the same value, so the pixel->uv->pixel round trip cancels exactly.
+	g_ssr_screen_uv     = fragment_position / get_ssr_buffer_size();
 	g_ssr_motion_vector = motion_vector;
 #ifdef ACCUM_PIXEL_HAS_ROUGHNESS
 	// Roughness MRT output is only present for geometry with SV_Target4 (not halogram/water/displacement).

@@ -253,7 +253,12 @@ accum_pixel static_sh_ps(
 		// halo3-ng: reproject SSR sample back to prev-frame UV where compute wrote it.
 		// ResourceSSRFinal is produced at [Present] referencing prev-frame geometry;
 		// MV from the current forward pass brings the current fragment to the matching sample.
-		const float2 viewport_size = float2(1920.0f, 1080.0f);
+		// Resolution independence (Aug 2026): ask the SSR buffer (its own t19 decl,
+		// ssr_buffer_glass) instead of assuming 1920x1080. max(...,2) keeps the
+		// `int2(viewport_size) - 2` clamp bound non-negative if t19 is unbound.
+		uint gssr_w, gssr_h;
+		ssr_buffer_glass.GetDimensions(gssr_w, gssr_h);
+		const float2 viewport_size = float2(max(gssr_w, 2u), max(gssr_h, 2u));
 		float2 curr_uv   = (fragment_position.xy + float2(0.5f, 0.5f)) / viewport_size;
 	#ifdef ACCUM_PIXEL_HAS_MV
 		// Broken first-person-weapon MV is suppressed at the SOURCE in compute_motion_vector()

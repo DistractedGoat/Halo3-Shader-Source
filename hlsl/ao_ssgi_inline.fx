@@ -36,6 +36,26 @@ Texture2D<float4> gi_dir_b : register(t26);
 //   IniParams[6].x = $ssgi_albedo_boost (Phase F3 DiffuseColorBoost equiv — trace-side only)
 Texture1D<float4> ssgi_iniparams : register(t120);
 
+// halo3-ng RESOLUTION INDEPENDENCE (Aug 2026). The render size is published to IniParams row 6
+// (.y = width, .z = height) once per frame by [CustomShaderEffectChainEarly] in d3dx.ini, which
+// takes it from rt_width/rt_height at the pre-pass -> forward-lighting boundary — the same place
+// the effect buffers are sized from, so the consumer and the buffers can never disagree.
+//
+// WHY IniParams AND NOT GetDimensions() ON ONE OF OUR OWN BUFFERS: the consumer's inputs are
+// CONDITIONALLY UNBOUND — ao_ssgi_buffer (t21) is nulled when AO is off (x == 0), and
+// gi_buffer / ssgi_hbil_lowfreq (t22 / t34) are nulled when SSGI is off (y == 0).
+// GetDimensions() on an unbound SRV returns 0, so sizing from one of those would divide by zero
+// in exactly the effects-off A/B path (F4 / F11 / Ctrl+F11) — it would break the comparison mode
+// used to judge every change. t120 is 3DMigoto's reserved slot and is bound on every draw.
+//
+// FALLBACK: with no 3DMigoto at all (or before the first publish) t120 is unbound, Load() returns
+// 0, and the guard drops to 1920x1080 — the exact pre-Aug-2026 behaviour.
+float2 get_viewport_size()
+{
+    float2 vp = ssgi_iniparams.Load(int2(6, 0)).yz;
+    return (vp.x < 16.0f || vp.y < 16.0f) ? float2(1920.0f, 1080.0f) : vp;
+}
+
 // Phase F2c — screen-probe gather upsample inputs. 120×68 probe grid (16×16 pixel tiles).
 // Slots above the existing SSGI per-channel (t24-t26) and above the decorator prev_VP
 // (t23). t27-t31 are confirmed free of the fxc PARAM_SAMPLER_2D range and the global
@@ -207,7 +227,9 @@ void apply_ao_ssgi_inline(
     float reproj_scale = ssgi_iniparams.Load(int2(1, 0)).y;
     float2 mv_used = motion_vector * reproj_scale;
 
-    const float2 viewport_size = float2(1920.0f, 1080.0f);
+    // Resolution independence (Aug 2026): was float2(1920.0f, 1080.0f). Every buffer this
+    // function samples is now allocated at the render resolution, so this must track it too.
+    const float2 viewport_size = get_viewport_size();
     float2 curr_uv    = (fragment_position + float2(0.5f, 0.5f)) / viewport_size;
 
     float curr_viewZ  = 0.00781f / max(raw_depth, 1e-6f);
@@ -274,10 +296,18 @@ void apply_ao_ssgi_inline(
     // in object_mv_finalize) -> reproj_uv unchanged -> bit-identical. Bilinear from the 240×135 field.
     // omv_-prefixed locals (no frac()/banned-identifier collision; floor used, not frac — lessons #20/#22).
     {
-        float2 omv_p  = curr_uv * float2(240.0f, 135.0f) - 0.5f;
+        // Resolution independence (Aug 2026): the residual field is no longer a fixed 240x135 —
+        // it is sized by width_multiply 0.125 off the render target, so query it. ps-t36 is bound
+        // UNCONDITIONALLY (d3dx.ini), but the max(...,2) guard keeps this safe on any draw where
+        // it somehow is not: size (2,2) -> clamp to texel 0 -> Load returns 0 on an unbound SRV ->
+        // zero residual -> reproj_uv unchanged, i.e. exactly the $object_mv-off behaviour.
+        uint omv_w, omv_h;
+        g_object_mv.GetDimensions(omv_w, omv_h);
+        float2 omv_size = float2(max(omv_w, 2u), max(omv_h, 2u));
+        float2 omv_p  = curr_uv * omv_size - 0.5f;
         float2 omv_fl = floor(omv_p);
         float2 omv_f  = omv_p - omv_fl;
-        int2   omv_b  = clamp(int2(omv_fl), int2(0, 0), int2(238, 133));
+        int2   omv_b  = clamp(int2(omv_fl), int2(0, 0), int2(omv_size) - 2);
         float2 omv00 = g_object_mv.Load(int3(omv_b + int2(0, 0), 0)).xy;
         float2 omv10 = g_object_mv.Load(int3(omv_b + int2(1, 0), 0)).xy;
         float2 omv01 = g_object_mv.Load(int3(omv_b + int2(0, 1), 0)).xy;
@@ -534,7 +564,7 @@ void apply_ao_ssgi_inline(
             float ring_s, ring_c;
             sincos(ring_ang, ring_s, ring_c);
             int2 ring_px = clamp(pix00 + int2(int(ring_c * ring_rad), int(ring_s * ring_rad)),
-                                 int2(0, 0), int2(1918, 1078));
+                                 int2(0, 0), int2(viewport_size) - 2);
             float4 ring_ao_s = ao_ssgi_buffer.Load(int3(ring_px, 0));
             // One-sided (June 12): nearer = occluder -> reject at ring_relax; deeper =
             // background -> near-unconditional (8x falloff). In foliage the ring now
@@ -750,12 +780,14 @@ void apply_ao_ssgi_inline(
     // the fractional part manually here as `texel_pos - floor(texel_pos)`. Renaming the
     // locals with an `sss_` prefix to keep them disjoint from anything in outer scope.
     {
-        const float2 sss_viewport_px = float2(1920.0f, 1080.0f);
+        // Resolution independence (Aug 2026): reuse the outer scope's viewport_size (same
+        // function — see the `frac`-shadowing note above) rather than a second literal.
+        const float2 sss_viewport_px = viewport_size;
         float2 sss_uv        = clamp(reproj_uv, float2(0, 0), float2(1, 1));
         float2 sss_texel_pos = sss_uv * sss_viewport_px - 0.5f;
         float2 sss_floor     = floor(sss_texel_pos);
         float2 sss_frac      = sss_texel_pos - sss_floor;
-        int2   sss_base      = clamp(int2(sss_floor), int2(0, 0), int2(1918, 1078));
+        int2   sss_base      = clamp(int2(sss_floor), int2(0, 0), int2(sss_viewport_px) - 2);
 
         float4 s00 = sss_buffer.Load(int3(sss_base, 0));
         float4 s10 = sss_buffer.Load(int3(sss_base + int2(1, 0), 0));
